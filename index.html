@@ -15,10 +15,10 @@
             </div>
             <div class="contact-list" id="contact-list"></div>
             <div class="sidebar-footer">
-                <button onclick="promptNewRoom()">+ New Chat</button>
+                <button onclick="promptNewRoom()">New Chat</button>
             </div>
         </div>
-        <div class="main" id="main-chat">
+        <div class="main hidden" id="main-chat">
             <div class="chat-header">
                 <button class="back-btn" onclick="goBack()">←</button>
                 <span class="partner-info">
@@ -26,6 +26,19 @@
                     <span id="partner-name-display"></span>
                 </span>
                 <span class="online-status" id="online-status">⚪ Disconnected</span>
+            </div>
+            <div class="signaling-area" id="signaling-area">
+                <div class="signal-row">
+                    <textarea id="offer-textarea" placeholder="Offer from partner" rows="2"></textarea>
+                    <button onclick="joinRoom()">Join Room</button>
+                </div>
+                <div class="signal-row">
+                    <textarea id="answer-textarea" placeholder="Answer from partner" rows="2"></textarea>
+                    <button onclick="completeConnection()">Complete connection</button>
+                </div>
+                <div class="signal-row">
+                    <button onclick="createRoom()" id="create-room-btn">Create Room (copy offer)</button>
+                </div>
             </div>
             <div id="pinned-messages"></div>
             <div id="messages"></div>
@@ -37,18 +50,10 @@
         </div>
         <div class="modal hidden" id="new-room-modal">
             <div class="modal-content">
-                <h3>New Chat</h3>
-                <div id="room-placeholder">
-                    <button onclick="createRoom()">Create Room</button>
-                    <p>or</p>
-                    <input type="text" id="join-room-input" placeholder="Room code">
-                    <button onclick="joinRoom()">Join</button>
-                </div>
-                <div id="room-created" class="hidden">
-                    <p>Room code (copied):</p>
-                    <div class="room-code" id="room-code-display"></div>
-                    <button onclick="closeNewRoomModal()">OK</button>
-                </div>
+                <h3>Start a new chat</h3>
+                <p>This will create a new room and copy the connection offer for your partner.</p>
+                <button onclick="createRoom(); closeNewRoomModal();">Create Room</button>
+                <button onclick="closeNewRoomModal()">Cancel</button>
             </div>
         </div>
         <div class="modal hidden" id="settings-modal">
@@ -68,7 +73,6 @@
             </div>
         </div>
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/trystero@0.20.0/dist/trystero.torrent.min.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

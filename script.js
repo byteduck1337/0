@@ -59,7 +59,7 @@ let contacts = {};
 let activePeer = null;
 let peerConnection = null;
 let dataChannel = null;
-let pendingSessionKey = CryptoSystem.generateKey();
+let pendingSessionKey = CryptoSystem.generateKey(); // новый ключ для каждого соединения
 let partnerOffer = null;
 
 function $(id) { return document.getElementById(id); }
@@ -125,6 +125,7 @@ async function createRoom() {
     renderContactList();
     openChat(tempId);
     closeNewRoomModal();
+    pendingSessionKey = CryptoSystem.generateKey(); // свежий ключ
     await setupWebRTC(true);
 }
 
@@ -135,6 +136,7 @@ async function joinRoom() {
     try {
         partnerOffer = JSON.parse(offerStr);
     } catch (e) { alert('Invalid offer format.'); return; }
+    pendingSessionKey = CryptoSystem.generateKey(); // свежий ключ
     await setupWebRTC(false);
 }
 
@@ -154,11 +156,7 @@ async function setupWebRTC(isOfferer) {
 
     peerConnection.onicecandidate = () => {};
     peerConnection.onconnectionstatechange = () => {
-        if (peerConnection.connectionState === 'connected') {
-            dataChannel.send(JSON.stringify({ type: 'key', key: pendingSessionKey }));
-            $('signaling-area').style.display = 'none';
-            updateOnlineStatus();
-        }
+        updateOnlineStatus();
     };
 
     if (!isOfferer) {
@@ -204,12 +202,18 @@ function waitForIceGathering() {
 
 function setupDataChannel() {
     if (!dataChannel) return;
-    dataChannel.onopen = () => updateOnlineStatus();
+    dataChannel.onopen = () => {
+        // Отправляем свой ключ партнёру сразу после открытия канала
+        dataChannel.send(JSON.stringify({ type: 'key', key: pendingSessionKey }));
+        updateOnlineStatus();
+        $('signaling-area').style.display = 'none';
+    };
     dataChannel.onmessage = event => {
         const data = JSON.parse(event.data);
         if (data.type === 'key') {
             contacts[activePeer].sessionKey = data.key;
             saveContacts();
+            // Можно показать уведомление, что ключ получен
         } else if (data.type === 'message') {
             handleIncomingMessage(activePeer, data);
         }
@@ -223,7 +227,10 @@ function sendMessage() {
         return;
     }
     const sessionKey = contacts[activePeer]?.sessionKey;
-    if (!sessionKey) { alert('Encryption key not yet exchanged.'); return; }
+    if (!sessionKey) {
+        alert('Encryption key not yet exchanged. Please wait a moment.');
+        return;
+    }
     const packets = CryptoSystem.encryptDual(text, sessionKey);
     const msgObj = { type: 'message', from: currentUser, packets, timestamp: Date.now() };
     dataChannel.send(JSON.stringify(msgObj));
@@ -271,7 +278,8 @@ function loadMessages(peerId) {
 }
 
 function updateOnlineStatus() {
-    $('online-status').innerText = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Online' : '⚪ Disconnected';
+    const status = dataChannel && dataChannel.readyState === 'open' ? '🟢 Online' : '⚪ Disconnected';
+    $('online-status').innerText = status;
 }
 
 function togglePin(peerId, ts) {

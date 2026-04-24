@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>/0byte/</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>/0byte/ — p2p messenger</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -11,16 +11,16 @@
         <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <span class="app-title">/0byte/</span>
-                <button onclick="showSettings()">⚙️</button>
+                <button onclick="showSettings()" aria-label="Settings">⚙️</button>
             </div>
             <div class="contact-list" id="contact-list"></div>
             <div class="sidebar-footer">
-                <button onclick="promptNewRoom()">New Chat</button>
+                <button onclick="promptNewRoom()">+ New Chat</button>
             </div>
         </div>
         <div class="main hidden" id="main-chat">
             <div class="chat-header">
-                <button class="back-btn" onclick="goBack()">←</button>
+                <button class="back-btn" onclick="goBack()" aria-label="Back">←</button>
                 <span class="partner-info">
                     <span class="partner-avatar" id="partner-avatar"></span>
                     <span id="partner-name-display"></span>
@@ -34,7 +34,7 @@
                 </div>
                 <div class="signal-row">
                     <textarea id="answer-textarea" placeholder="Answer from partner" rows="2"></textarea>
-                    <button onclick="completeConnection()">Complete connection</button>
+                    <button onclick="completeConnection()">Complete</button>
                 </div>
                 <div class="signal-row">
                     <button onclick="createRoom()" id="create-room-btn">Create Room (copy offer)</button>
@@ -44,8 +44,8 @@
             <div id="messages"></div>
             <div class="message-input-section">
                 <input type="text" class="message-input" id="message-input" placeholder="Type a message..."
-                       onkeypress="if(event.key==='Enter') sendMessage()">
-                <button class="send-btn" onclick="sendMessage()">➤</button>
+                       onkeypress="if(event.key==='Enter') sendMessage()" enterkeyhint="send">
+                <button class="send-btn" onclick="sendMessage()" aria-label="Send">➤</button>
             </div>
         </div>
         <div class="modal hidden" id="new-room-modal">

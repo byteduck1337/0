@@ -57,7 +57,11 @@ class CryptoSystem {
 let currentUser, myName = 'You', myAvatar = '👤';
 let contacts = {};
 let activePeer = null;
-let room = null;
+let peerConnection = null;
+let dataChannel = null;
+let pendingSessionKey = CryptoSystem.generateKey();
+let partnerOffer = null;
+let keySent = false; // чтобы не спамить ключами
 
 function $(id) { return document.getElementById(id); }
 
@@ -73,10 +77,10 @@ function loadSettings() {
     $('avatar-input').value = myAvatar;
     contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
     renderContactList();
-    const savedRoom = localStorage.getItem('activeRoom');
-    if (savedRoom) {
-        room = trystero.joinRoom({ appId: '/0byte/' }, savedRoom);
-        setupRoomListeners();
+    if (activePeer) openChat(activePeer);
+    else {
+        $('main-chat').classList.add('hidden');
+        $('sidebar').classList.remove('hidden');
     }
 }
 
@@ -133,78 +137,154 @@ function goBack() {
 function promptNewRoom() {
     $('new-room-modal').classList.remove('hidden');
     $('room-create').classList.remove('hidden');
-    $('room-created').classList.add('hidden');
-    $('join-room-input').value = '';
+    $('room-waiting').classList.add('hidden');
+    $('room-joining').classList.add('hidden');
+    $('offer-textarea').value = '';
+    $('answer-textarea').value = '';
+    // Сбрасываем флаг отправки ключа для нового соединения
+    keySent = false;
 }
 
-function closeNewRoomModal() { $('new-room-modal').classList.add('hidden'); }
-
-function generateRoomCode() {
-    const adj = ['brave','calm','cool','dark','fancy','glad','kind','nice','quick','sharp','swift','wild','wise','young','bold','bright'];
-    const noun = ['wolf','fox','cat','bear','hawk','deer','frog','hare','lynx','seal','boar','newt','crab','dove','hawk','wren'];
-    return adj[Math.floor(Math.random() * adj.length)] + '-' +
-           noun[Math.floor(Math.random() * noun.length)] + '-' +
-           Math.floor(Math.random() * 100);
+function closeNewRoomModal() {
+    $('new-room-modal').classList.add('hidden');
 }
 
 async function createRoom() {
-    const code = generateRoomCode();
-    navigator.clipboard.writeText(code);
-    $('room-code-display').innerText = code;
+    const tempId = 'partner-' + Math.random().toString(36).substr(2, 6);
+    contacts[tempId] = { name: tempId, avatar: '❓' };
+    activePeer = tempId;
+    saveContacts();
+    renderContactList();
+    openChat(tempId);
+    
     $('room-create').classList.add('hidden');
-    $('room-created').classList.remove('hidden');
-    if (room) room.leave();
-    room = window.trystero.joinRoom({ appId: '/0byte/' }, code);
-    setupRoomListeners();
-    localStorage.setItem('activeRoom', code);
+    $('room-waiting').classList.remove('hidden');
+    
+    pendingSessionKey = CryptoSystem.generateKey();
+    await setupWebRTC(true);
 }
 
 async function joinRoom() {
-    const code = $('join-room-input').value.trim().toLowerCase();
-    if (!code) return;
-    closeNewRoomModal();
-    if (room) room.leave();
-    room = trystero.joinRoom({ appId: '/0byte/' }, code);
-    setupRoomListeners();
-    localStorage.setItem('activeRoom', code);
+    const offerStr = $('offer-textarea').value.trim();
+    if (!offerStr) return alert('Paste partner offer first.');
+    try {
+        partnerOffer = JSON.parse(offerStr);
+    } catch (e) { alert('Invalid offer format.'); return; }
+    
+    const tempId = 'partner-' + Math.random().toString(36).substr(2, 6);
+    contacts[tempId] = { name: tempId, avatar: '❓' };
+    activePeer = tempId;
+    saveContacts();
+    renderContactList();
+    openChat(tempId);
+    
+    $('room-create').classList.add('hidden');
+    $('room-joining').classList.remove('hidden');
+    
+    pendingSessionKey = CryptoSystem.generateKey();
+    await setupWebRTC(false);
 }
 
-function setupRoomListeners() {
-    room.onPeerJoin(peerId => {
-        if (!contacts[peerId]) {
-            contacts[peerId] = { name: peerId.slice(0, 8), avatar: '❓', joined: Date.now() };
-            saveContacts();
-            renderContactList();
-        }
-        const key = CryptoSystem.generateKey();
-        room.send({ type: 'key', key }, peerId);
-    });
+async function completeConnection() {
+    const answerStr = $('answer-textarea').value.trim();
+    if (!peerConnection || !answerStr) return alert('No answer to apply.');
+    try {
+        const answer = JSON.parse(answerStr);
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        closeNewRoomModal();
+    } catch (e) { alert('Invalid answer: ' + e.message); }
+}
 
-    room.onPeerMessage((peerId, data) => {
-        if (data.type === 'key') {
-            contacts[peerId].sessionKey = data.key;
-            saveContacts();
-        } else if (data.type === 'message') {
-            handleIncomingMessage(peerId, data);
-        }
-    });
+async function setupWebRTC(isOfferer) {
+    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    peerConnection = new RTCPeerConnection(configuration);
+    dataChannel = isOfferer ? peerConnection.createDataChannel('chat') : null;
 
-    room.onPeerLeave(peerId => {
+    peerConnection.onicecandidate = () => {};
+    peerConnection.onconnectionstatechange = () => {
         updateOnlineStatus();
+    };
+
+    if (!isOfferer) {
+        peerConnection.ondatachannel = event => {
+            dataChannel = event.channel;
+            setupDataChannel();
+        };
+    }
+
+    if (isOfferer) {
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        await waitForIceGathering();
+        const offerStr = JSON.stringify(peerConnection.localDescription);
+        $('offer-display').value = offerStr;
+        copyToClipboard(offerStr);
+        alert('Offer copied to clipboard! Send it to your partner.');
+    } else {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(partnerOffer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await waitForIceGathering();
+        const answerStr = JSON.stringify(peerConnection.localDescription);
+        $('answer-display').value = answerStr;
+        copyToClipboard(answerStr);
+        alert('Answer copied to clipboard! Send it back to your partner.');
+    }
+
+    setupDataChannel();
+}
+
+function waitForIceGathering() {
+    return new Promise(resolve => {
+        if (peerConnection.iceGatheringState === 'complete') resolve();
+        else {
+            peerConnection.onicegatheringstatechange = () => {
+                if (peerConnection.iceGatheringState === 'complete') resolve();
+            };
+            setTimeout(resolve, 3000);
+        }
     });
+}
+
+function setupDataChannel() {
+    if (!dataChannel) return;
+    dataChannel.onopen = () => {
+        // Отправляем ключ дважды с небольшим интервалом для надёжности
+        const sendKey = () => {
+            dataChannel.send(JSON.stringify({ type: 'key', key: pendingSessionKey }));
+        };
+        sendKey();
+        setTimeout(sendKey, 500);
+        keySent = true;
+        updateOnlineStatus();
+    };
+    dataChannel.onmessage = event => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'key') {
+            contacts[activePeer].sessionKey = data.key;
+            saveContacts();
+            // Перезагрузим сообщения, так как теперь ключ есть
+            if (activePeer) loadMessages(activePeer);
+        } else if (data.type === 'message') {
+            handleIncomingMessage(activePeer, data);
+        }
+    };
 }
 
 function sendMessage() {
     const text = $('message-input').value.trim();
-    if (!text || !activePeer || !room) return;
+    if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') {
+        alert('No connection.');
+        return;
+    }
     const sessionKey = contacts[activePeer]?.sessionKey;
     if (!sessionKey) {
-        alert('Encryption key not yet exchanged. Please wait...');
+        alert('Encryption key not yet exchanged. Please wait a moment.');
         return;
     }
     const packets = CryptoSystem.encryptDual(text, sessionKey);
     const msgObj = { type: 'message', from: currentUser, packets, timestamp: Date.now() };
-    room.send(msgObj, activePeer);
+    dataChannel.send(JSON.stringify(msgObj));
     saveMessageToHistory(activePeer, msgObj);
     $('message-input').value = '';
     loadMessages(activePeer);
@@ -249,9 +329,8 @@ function loadMessages(peerId) {
 }
 
 function updateOnlineStatus() {
-    if (!activePeer || !room) return;
-    const online = room.getPeers().includes(activePeer);
-    $('online-status').innerText = online ? '🟢 Online' : '⚪ Offline';
+    const status = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Online' : '⚪ Disconnected';
+    $('online-status').innerText = status;
 }
 
 function togglePin(peerId, ts) {
@@ -301,6 +380,24 @@ function loadTheme() {
         document.body.classList.add('dark');
         $('theme-toggle').checked = true;
     }
+}
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).catch(() => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+    });
+}
+function copyOffer() {
+    copyToClipboard($('offer-display').value);
+    alert('Offer copied again.');
+}
+function copyAnswer() {
+    copyToClipboard($('answer-display').value);
+    alert('Answer copied again.');
 }
 
 window.onload = () => {

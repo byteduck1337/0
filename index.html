@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>/0byte/ — p2p messenger</title>
+    <title>/0byte/</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,40 +20,35 @@
         </div>
         <div class="main hidden" id="main-chat">
             <div class="chat-header">
-                <button class="back-btn" onclick="goBack()" aria-label="Back">←</button>
+                <button class="back-btn" onclick="goBack()">←</button>
                 <span class="partner-info">
                     <span class="partner-avatar" id="partner-avatar"></span>
                     <span id="partner-name-display"></span>
                 </span>
                 <span class="online-status" id="online-status">⚪ Disconnected</span>
             </div>
-            <div class="signaling-area" id="signaling-area">
-                <div class="signal-row">
-                    <textarea id="offer-textarea" placeholder="Offer from partner" rows="2"></textarea>
-                    <button onclick="joinRoom()">Join Room</button>
-                </div>
-                <div class="signal-row">
-                    <textarea id="answer-textarea" placeholder="Answer from partner" rows="2"></textarea>
-                    <button onclick="completeConnection()">Complete</button>
-                </div>
-                <div class="signal-row">
-                    <button onclick="createRoom()" id="create-room-btn">Create Room (copy offer)</button>
-                </div>
-            </div>
             <div id="pinned-messages"></div>
             <div id="messages"></div>
             <div class="message-input-section">
                 <input type="text" class="message-input" id="message-input" placeholder="Type a message..."
                        onkeypress="if(event.key==='Enter') sendMessage()" enterkeyhint="send">
-                <button class="send-btn" onclick="sendMessage()" aria-label="Send">➤</button>
+                <button class="send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
         <div class="modal hidden" id="new-room-modal">
             <div class="modal-content">
-                <h3>Start a new chat</h3>
-                <p>This will create a new room and copy the connection offer for your partner.</p>
-                <button onclick="createRoom(); closeNewRoomModal();">Create Room</button>
-                <button onclick="closeNewRoomModal()">Cancel</button>
+                <h3>New Chat</h3>
+                <div id="room-create">
+                    <button onclick="createRoom()">Create Room</button>
+                    <p>or</p>
+                    <input type="text" id="join-room-input" placeholder="Room code">
+                    <button onclick="joinRoom()">Join Room</button>
+                </div>
+                <div id="room-created" class="hidden">
+                    <p>Room code (copied):</p>
+                    <div class="room-code" id="room-code-display"></div>
+                    <button onclick="closeNewRoomModal()">OK</button>
+                </div>
             </div>
         </div>
         <div class="modal hidden" id="settings-modal">
@@ -73,6 +68,7 @@
             </div>
         </div>
     </div>
+    <script src="trystero.torrent.min.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

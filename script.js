@@ -154,7 +154,7 @@ async function createRoom() {
     $('room-create').classList.add('hidden');
     $('room-created').classList.remove('hidden');
     if (room) room.leave();
-    room = trystero.joinRoom({ appId: '/0byte/' }, code);
+    room = window.trystero.joinRoom({ appId: '/0byte/' }, code);
     setupRoomListeners();
     localStorage.setItem('activeRoom', code);
 }

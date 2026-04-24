@@ -1,0 +1,268 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+    background: #f8f9fa;
+    color: #1e293b;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
+}
+
+#app {
+    width: 100%;
+    max-width: 900px;
+    background: #ffffff;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    border: 1px solid #e0e0e0;
+    padding: 24px;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.app-title {
+    font-size: 1.8rem;
+    font-weight: 600;
+    margin-bottom: 24px;
+    letter-spacing: -0.5px;
+}
+
+.user-info {
+    margin-bottom: 24px;
+}
+
+.username-display {
+    font-size: 1.1rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.copy-key-btn {
+    background: #1e293b;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.copy-key-btn:hover {
+    background: #334155;
+}
+
+.partner-section {
+    border: 1px solid #e2e8f0;
+    padding: 16px;
+    margin-bottom: 24px;
+}
+
+.input-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.partner-input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    font-size: 0.95rem;
+    background: #fff;
+    transition: border-color 0.2s;
+}
+
+.partner-input:focus {
+    outline: none;
+    border-color: #1e293b;
+}
+
+.connect-btn {
+    background: #1e293b;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+    white-space: nowrap;
+}
+
+.connect-btn:hover {
+    background: #334155;
+}
+
+.status-message {
+    margin-top: 12px;
+    font-size: 0.85rem;
+    color: #475569;
+    padding: 8px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+}
+
+.chat-section {
+    border: 1px solid #e2e8f0;
+    overflow: hidden;
+}
+
+.chat-header {
+    background: #1e293b;
+    color: white;
+    padding: 12px 16px;
+    font-weight: 500;
+    font-size: 1rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.online-status {
+    font-size: 0.8rem;
+    font-weight: 400;
+}
+
+#messages {
+    height: 400px;
+    overflow-y: auto;
+    padding: 16px;
+    background: #ffffff;
+}
+
+.message {
+    margin-bottom: 14px;
+    display: flex;
+    flex-direction: column;
+}
+
+.message-bubble {
+    max-width: 70%;
+    padding: 10px 14px;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    word-wrap: break-word;
+}
+
+.my-message .message-bubble {
+    background: #1e293b;
+    color: #ffffff;
+    align-self: flex-end;
+}
+
+.other-message .message-bubble {
+    background: #f1f5f9;
+    color: #1e293b;
+    align-self: flex-start;
+    border: 1px solid #e2e8f0;
+}
+
+.message-meta {
+    font-size: 0.7rem;
+    margin-top: 4px;
+    color: #64748b;
+}
+
+.my-message .message-meta {
+    text-align: right;
+}
+
+.other-message .message-meta {
+    text-align: left;
+}
+
+.message-input-section {
+    padding: 12px 16px;
+    display: flex;
+    gap: 8px;
+    border-top: 1px solid #e2e8f0;
+    background: #ffffff;
+}
+
+.message-input {
+    flex: 1;
+    padding: 10px 12px;
+    border: 1px solid #cbd5e1;
+    font-size: 0.95rem;
+    background: #fff;
+    transition: border-color 0.2s;
+}
+
+.message-input:focus {
+    outline: none;
+    border-color: #1e293b;
+}
+
+.send-btn {
+    background: #1e293b;
+    color: white;
+    border: none;
+    padding: 10px 18px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.send-btn:hover {
+    background: #334155;
+}
+
+.waiting-indicator {
+    text-align: center;
+    padding: 40px;
+    color: #64748b;
+}
+
+.system-msg {
+    text-align: center;
+    color: #94a3b8;
+    font-size: 0.8rem;
+    margin: 8px 0;
+}
+
+.encrypted-badge {
+    font-size: 0.65rem;
+    opacity: 0.7;
+    margin-left: 4px;
+}
+
+@media (max-width: 600px) {
+    body {
+        padding: 10px;
+    }
+    #app {
+        padding: 16px;
+    }
+    .input-group {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .connect-btn {
+        width: 100%;
+    }
+    .message-input-section {
+        flex-direction: column;
+    }
+    .send-btn {
+        width: 100%;
+    }
+    #messages {
+        height: 300px;
+    }
+    .message-bubble {
+        max-width: 85%;
+    }
+}

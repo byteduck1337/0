@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>/0byte/</title>
+    <title>/0byte/ — p2p messenger</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,10 +15,10 @@
             </div>
             <div class="contact-list" id="contact-list"></div>
             <div class="sidebar-footer">
-                <button onclick="addContactPrompt()">+ New Chat</button>
+                <button onclick="promptNewRoom()">+ New Chat</button>
             </div>
         </div>
-        <div class="main hidden" id="main-chat">
+        <div class="main" id="main-chat">
             <div class="chat-header">
                 <button class="back-btn" onclick="goBack()">←</button>
                 <span class="partner-info">
@@ -26,21 +26,6 @@
                     <span id="partner-name-display"></span>
                 </span>
                 <span class="online-status" id="online-status">⚪ Disconnected</span>
-            </div>
-            <div class="signaling-box" id="signaling-box">
-                <div class="signal-row">
-                    <label>Your signal: <textarea id="local-signal" rows="2" readonly></textarea></label>
-                    <button onclick="generateOffer()">Start connection</button>
-                    <button onclick="copyLocalSignal()">Copy</button>
-                </div>
-                <div class="signal-row">
-                    <label>Partner's offer: <textarea id="remote-offer" rows="2" placeholder="Paste partner's offer"></textarea></label>
-                    <button onclick="acceptOffer()">Answer</button>
-                </div>
-                <div class="signal-row">
-                    <label>Partner's answer: <textarea id="remote-answer" rows="2" placeholder="Paste partner's answer"></textarea></label>
-                    <button onclick="completeConnection()">Complete</button>
-                </div>
             </div>
             <div id="pinned-messages"></div>
             <div id="messages"></div>
@@ -50,13 +35,29 @@
                 <button class="send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
-        <div class="settings-modal hidden" id="settings-modal">
+        <div class="modal hidden" id="new-room-modal">
+            <div class="modal-content">
+                <h3>New Chat</h3>
+                <div id="room-placeholder">
+                    <button onclick="createRoom()">Create Room</button>
+                    <p>or</p>
+                    <input type="text" id="join-room-input" placeholder="Room code">
+                    <button onclick="joinRoom()">Join</button>
+                </div>
+                <div id="room-created" class="hidden">
+                    <p>Room code (copied):</p>
+                    <div class="room-code" id="room-code-display"></div>
+                    <button onclick="closeNewRoomModal()">OK</button>
+                </div>
+            </div>
+        </div>
+        <div class="modal hidden" id="settings-modal">
             <div class="modal-content">
                 <h3>Settings</h3>
                 <label>Name: <input type="text" id="name-input"></label>
                 <label>Avatar (emoji): <input type="text" id="avatar-input" maxlength="4"></label>
                 <div class="theme-switch">
-                    <span>Dark theme (orange)</span>
+                    <span>Dark orange theme</span>
                     <label class="toggle">
                         <input type="checkbox" id="theme-toggle" onchange="toggleTheme()">
                         <span class="slider"></span>
@@ -66,15 +67,8 @@
                 <button onclick="closeSettings()">Cancel</button>
             </div>
         </div>
-        <div class="add-contact-modal hidden" id="add-contact-modal">
-            <div class="modal-content">
-                <h3>Add Contact</h3>
-                <input type="text" id="new-contact-key" placeholder="Partner's encryption key">
-                <button onclick="connectToPartner()">Add</button>
-                <button onclick="closeAddContact()">Cancel</button>
-            </div>
-        </div>
     </div>
+    <script src="https://cdn.jsdelivr.net/npm/trystero@0.20.0/dist/trystero.torrent.min.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

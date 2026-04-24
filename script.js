@@ -1,10 +1,10 @@
-// Crypto System (unchanged)
 class CryptoSystem {
     static generateKey() {
         const arr = new Uint8Array(32);
         crypto.getRandomValues(arr);
         return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
     }
+
     static caesar(str, shift) {
         return [...str].map(c => {
             const code = c.charCodeAt(0);
@@ -12,6 +12,7 @@ class CryptoSystem {
             return c;
         }).join('');
     }
+
     static sha256(str) {
         let hash = 0;
         for (let i = 0; i < str.length; i++) {
@@ -21,6 +22,7 @@ class CryptoSystem {
         }
         return Math.abs(hash);
     }
+
     static encryptDual(msg, key) {
         const shift = this.sha256(key) % 95;
         const obj = { text: msg, ts: Date.now() };
@@ -34,6 +36,7 @@ class CryptoSystem {
         const p2 = step2 + '|' + hash2;
         return { p1, p2 };
     }
+
     static decryptDual(p1, p2, key) {
         const shift = this.sha256(key) % 95;
         try {
@@ -51,21 +54,16 @@ class CryptoSystem {
     }
 }
 
-// State
-let currentUser = null;
-let myName = 'You';
-let myAvatar = '👤';
-let contacts = {}; // { peerId: { name, avatar, sessionKey? } }
+let currentUser, myName = 'You', myAvatar = '👤';
+let contacts = {};
 let activePeer = null;
 let peerConnection = null;
 let dataChannel = null;
-let pendingSessionKey = CryptoSystem.generateKey(); // our fresh key for the upcoming connection
+let pendingSessionKey = CryptoSystem.generateKey();
 let partnerOffer = null;
 
-// Utility
 function $(id) { return document.getElementById(id); }
 
-// Load settings
 function loadSettings() {
     myName = localStorage.getItem('myName') || 'You';
     myAvatar = localStorage.getItem('myAvatar') || '👤';
@@ -97,20 +95,14 @@ function openChat(peerId) {
     activePeer = peerId;
     $('partner-name-display').innerText = contacts[peerId]?.name || peerId.slice(0, 8);
     $('partner-avatar').innerText = contacts[peerId]?.avatar || '👤';
-    $('main-chat').classList.remove('hidden');
+    const main = $('main-chat');
+    main.classList.add('active');
+    main.classList.remove('hidden');
     $('sidebar').classList.add('hidden');
-    if (window.innerWidth > 700) {
-        $('sidebar').classList.remove('hidden');
-        $('main-chat').classList.add('active');
-    } else {
-        $('main-chat').classList.add('active');
-    }
     loadMessages(peerId);
     loadPinned(peerId);
     updateOnlineStatus();
-    // Show/hide signaling based on connection state
-    $('signaling-area').style.display = (dataChannel && dataChannel.readyState === 'open') ? 'none' : 'block';
-    // Clear textareas
+    $('signaling-area').style.display = (dataChannel && dataChannel.readyState === 'open') ? 'none' : 'flex';
     $('offer-textarea').value = '';
     $('answer-textarea').value = '';
 }
@@ -122,16 +114,10 @@ function goBack() {
     activePeer = null;
 }
 
-// Room / WebRTC
-function promptNewRoom() {
-    $('new-room-modal').classList.remove('hidden');
-}
-function closeNewRoomModal() {
-    $('new-room-modal').classList.add('hidden');
-}
+function promptNewRoom() { $('new-room-modal').classList.remove('hidden'); }
+function closeNewRoomModal() { $('new-room-modal').classList.add('hidden'); }
 
 async function createRoom() {
-    // Create a new contact entry for the partner (temporary id)
     const tempId = 'partner-' + Math.random().toString(36).substr(2, 6);
     contacts[tempId] = { name: tempId, avatar: '❓' };
     activePeer = tempId;
@@ -139,9 +125,7 @@ async function createRoom() {
     renderContactList();
     openChat(tempId);
     closeNewRoomModal();
-    // Start WebRTC as offerer
     await setupWebRTC(true);
-    // offer will be generated and placed in textarea, copied
 }
 
 async function joinRoom() {
@@ -168,13 +152,9 @@ async function setupWebRTC(isOfferer) {
     peerConnection = new RTCPeerConnection(configuration);
     dataChannel = isOfferer ? peerConnection.createDataChannel('chat') : null;
 
-    peerConnection.onicecandidate = event => {
-        if (event.candidate) return; // trickle, wait for gathering complete
-    };
-
+    peerConnection.onicecandidate = () => {};
     peerConnection.onconnectionstatechange = () => {
         if (peerConnection.connectionState === 'connected') {
-            // Exchange session keys via data channel
             dataChannel.send(JSON.stringify({ type: 'key', key: pendingSessionKey }));
             $('signaling-area').style.display = 'none';
             updateOnlineStatus();
@@ -189,9 +169,6 @@ async function setupWebRTC(isOfferer) {
     }
 
     if (isOfferer) {
-        dataChannel.onopen = () => {
-            // will send key once open
-        };
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
         await waitForIceGathering();
@@ -220,16 +197,14 @@ function waitForIceGathering() {
             peerConnection.onicegatheringstatechange = () => {
                 if (peerConnection.iceGatheringState === 'complete') resolve();
             };
-            setTimeout(resolve, 3000); // fallback
+            setTimeout(resolve, 3000);
         }
     });
 }
 
 function setupDataChannel() {
     if (!dataChannel) return;
-    dataChannel.onopen = () => {
-        updateOnlineStatus();
-    };
+    dataChannel.onopen = () => updateOnlineStatus();
     dataChannel.onmessage = event => {
         const data = JSON.parse(event.data);
         if (data.type === 'key') {
@@ -241,7 +216,6 @@ function setupDataChannel() {
     };
 }
 
-// Messaging
 function sendMessage() {
     const text = $('message-input').value.trim();
     if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') {
@@ -249,10 +223,7 @@ function sendMessage() {
         return;
     }
     const sessionKey = contacts[activePeer]?.sessionKey;
-    if (!sessionKey) {
-        alert('Encryption key not yet exchanged.');
-        return;
-    }
+    if (!sessionKey) { alert('Encryption key not yet exchanged.'); return; }
     const packets = CryptoSystem.encryptDual(text, sessionKey);
     const msgObj = { type: 'message', from: currentUser, packets, timestamp: Date.now() };
     dataChannel.send(JSON.stringify(msgObj));
@@ -260,16 +231,19 @@ function sendMessage() {
     $('message-input').value = '';
     loadMessages(activePeer);
 }
+
 function handleIncomingMessage(peerId, data) {
     saveMessageToHistory(peerId, data);
     if (peerId === activePeer) loadMessages(peerId);
 }
+
 function saveMessageToHistory(peerId, msg) {
     const key = `history_${[currentUser, peerId].sort().join('_')}`;
     const hist = JSON.parse(localStorage.getItem(key) || '[]');
     hist.push(msg);
     localStorage.setItem(key, JSON.stringify(hist));
 }
+
 function loadMessages(peerId) {
     const key = `history_${[currentUser, peerId].sort().join('_')}`;
     const hist = JSON.parse(localStorage.getItem(key) || '[]');
@@ -295,9 +269,9 @@ function loadMessages(peerId) {
     });
     container.scrollTop = container.scrollHeight;
 }
+
 function updateOnlineStatus() {
-    const status = $('online-status');
-    status.innerText = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Online' : '⚪ Disconnected';
+    $('online-status').innerText = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Online' : '⚪ Disconnected';
 }
 
 function togglePin(peerId, ts) {
@@ -321,6 +295,7 @@ function togglePin(peerId, ts) {
     localStorage.setItem(pinnedKey, JSON.stringify(pinned));
     loadPinned(peerId);
 }
+
 function loadPinned(peerId) {
     const pinned = JSON.parse(localStorage.getItem(`pinned_${peerId}`) || '[]');
     $('pinned-messages').innerHTML = pinned.length ? pinned.map(p => `📌 ${p.text}`).join(' | ') : '';
@@ -328,7 +303,6 @@ function loadPinned(peerId) {
 
 function saveContacts() { localStorage.setItem('contacts', JSON.stringify(contacts)); }
 
-// Settings & theme
 function showSettings() { $('settings-modal').classList.remove('hidden'); }
 function closeSettings() { $('settings-modal').classList.add('hidden'); }
 function saveSettings() {
@@ -362,7 +336,6 @@ function copyToClipboard(text) {
 window.onload = () => {
     loadTheme();
     loadSettings();
-    // Ensure main chat is hidden initially
     $('main-chat').classList.add('hidden');
     $('signaling-area').style.display = 'none';
 };

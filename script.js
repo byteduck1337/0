@@ -1,3 +1,4 @@
+﻿// Web Crypto AES-256-GCM encryption
 class CryptoSystem {
     static generateKey() {
         const arr = new Uint8Array(32);
@@ -5,52 +6,42 @@ class CryptoSystem {
         return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
     }
 
-    static caesar(str, shift) {
-        return [...str].map(c => {
-            const code = c.charCodeAt(0);
-            if (code >= 32 && code <= 126) return String.fromCharCode(((code - 32 + shift) % 95) + 32);
-            return c;
-        }).join('');
-    }
-
-    static sha256(str) {
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            const ch = str.charCodeAt(i);
-            hash = ((hash << 5) - hash) + ch;
-            hash = hash & hash;
+    static hexToBytes(hex) {
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < bytes.length; i++) {
+            bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
         }
-        return Math.abs(hash);
+        return bytes;
     }
 
-    static encryptDual(msg, key) {
-        const shift = this.sha256(key) % 95;
-        const obj = { text: msg, ts: Date.now() };
-        const json = JSON.stringify(obj);
-        const hash1 = this.sha256(json).toString();
-        const step1 = btoa(unescape(encodeURIComponent(json + '|' + hash1)));
-        const p1 = this.caesar(step1, shift);
-        const caesarJson = this.caesar(json, shift);
-        const step2 = btoa(unescape(encodeURIComponent(caesarJson)));
-        const hash2 = this.sha256(step2).toString();
-        const p2 = step2 + '|' + hash2;
-        return { p1, p2 };
+    static async importKey(hexKey) {
+        const rawKey = this.hexToBytes(hexKey);
+        return crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt']);
     }
 
-    static decryptDual(p1, p2, key) {
-        const shift = this.sha256(key) % 95;
+    static async encrypt(text, hexKey) {
+        const key = await this.importKey(hexKey);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encoded = new TextEncoder().encode(text);
+        const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, encoded);
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+        return btoa(String.fromCharCode(...combined));
+    }
+
+    static async decrypt(encryptedBase64, hexKey) {
         try {
-            const dec1 = this.caesar(p1, 95 - (shift % 95));
-            const decStr1 = decodeURIComponent(escape(atob(dec1)));
-            const [json1, hash1] = decStr1.split('|');
-            if (this.sha256(json1).toString() !== hash1) return null;
-            const [b64, hash2] = p2.split('|');
-            if (this.sha256(b64).toString() !== hash2) return null;
-            const decStr2 = decodeURIComponent(escape(atob(b64)));
-            const json2 = this.caesar(decStr2, 95 - (shift % 95));
-            if (json1 === json2) return JSON.parse(json1);
+            const key = await this.importKey(hexKey);
+            const data = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
+            const iv = data.slice(0, 12);
+            const ciphertext = data.slice(12);
+            const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ciphertext);
+            return new TextDecoder().decode(decrypted);
+        } catch (e) {
+            console.error('AES decrypt error:', e);
             return null;
-        } catch (e) { return null; }
+        }
     }
 }
 
@@ -59,9 +50,9 @@ let contacts = {};
 let activePeer = null;
 let peerConnection = null;
 let dataChannel = null;
-let pendingSessionKey = CryptoSystem.generateKey();
+let pendingLocalKey = null;
 let partnerOffer = null;
-let keySent = false; // чтобы не спамить ключами
+let keySendInterval = null;
 
 function $(id) { return document.getElementById(id); }
 
@@ -121,6 +112,7 @@ function openChat(peerId) {
     $('main-chat').classList.add('active');
     $('main-chat').classList.remove('hidden');
     $('sidebar').classList.add('hidden');
+    updateKeyDisplay();
     loadMessages(peerId);
     loadPinned(peerId);
     updateOnlineStatus();
@@ -141,8 +133,7 @@ function promptNewRoom() {
     $('room-joining').classList.add('hidden');
     $('offer-textarea').value = '';
     $('answer-textarea').value = '';
-    // Сбрасываем флаг отправки ключа для нового соединения
-    keySent = false;
+    clearInterval(keySendInterval);
 }
 
 function closeNewRoomModal() {
@@ -156,11 +147,15 @@ async function createRoom() {
     saveContacts();
     renderContactList();
     openChat(tempId);
-    
+
     $('room-create').classList.add('hidden');
     $('room-waiting').classList.remove('hidden');
-    
-    pendingSessionKey = CryptoSystem.generateKey();
+
+    pendingLocalKey = CryptoSystem.generateKey();
+    contacts[tempId].localSessionKey = pendingLocalKey;
+    saveContacts();
+    updateKeyDisplay();
+    console.log('My local session key:', pendingLocalKey);
     await setupWebRTC(true);
 }
 
@@ -170,18 +165,22 @@ async function joinRoom() {
     try {
         partnerOffer = JSON.parse(offerStr);
     } catch (e) { alert('Invalid offer format.'); return; }
-    
+
     const tempId = 'partner-' + Math.random().toString(36).substr(2, 6);
     contacts[tempId] = { name: tempId, avatar: '❓' };
     activePeer = tempId;
     saveContacts();
     renderContactList();
     openChat(tempId);
-    
+
     $('room-create').classList.add('hidden');
     $('room-joining').classList.remove('hidden');
-    
-    pendingSessionKey = CryptoSystem.generateKey();
+
+    pendingLocalKey = CryptoSystem.generateKey();
+    contacts[tempId].localSessionKey = pendingLocalKey;
+    saveContacts();
+    updateKeyDisplay();
+    console.log('My local session key:', pendingLocalKey);
     await setupWebRTC(false);
 }
 
@@ -208,6 +207,7 @@ async function setupWebRTC(isOfferer) {
     if (!isOfferer) {
         peerConnection.ondatachannel = event => {
             dataChannel = event.channel;
+            console.log('Data channel received');
             setupDataChannel();
         };
     }
@@ -219,7 +219,7 @@ async function setupWebRTC(isOfferer) {
         const offerStr = JSON.stringify(peerConnection.localDescription);
         $('offer-display').value = offerStr;
         copyToClipboard(offerStr);
-        alert('Offer copied to clipboard! Send it to your partner.');
+        alert('Offer copied!');
     } else {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(partnerOffer));
         const answer = await peerConnection.createAnswer();
@@ -228,7 +228,7 @@ async function setupWebRTC(isOfferer) {
         const answerStr = JSON.stringify(peerConnection.localDescription);
         $('answer-display').value = answerStr;
         copyToClipboard(answerStr);
-        alert('Answer copied to clipboard! Send it back to your partner.');
+        alert('Answer copied!');
     }
 
     setupDataChannel();
@@ -248,49 +248,65 @@ function waitForIceGathering() {
 
 function setupDataChannel() {
     if (!dataChannel) return;
+
     dataChannel.onopen = () => {
-        // Отправляем ключ дважды с небольшим интервалом для надёжности
+        console.log('Data channel opened, sending key');
         const sendKey = () => {
-            dataChannel.send(JSON.stringify({ type: 'key', key: pendingSessionKey }));
+            if (!dataChannel || dataChannel.readyState !== 'open') return;
+            dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
+            console.log('Sent key:', pendingLocalKey);
         };
         sendKey();
-        setTimeout(sendKey, 500);
-        keySent = true;
+        clearInterval(keySendInterval);
+        keySendInterval = setInterval(sendKey, 400);
         updateOnlineStatus();
     };
+
     dataChannel.onmessage = event => {
         const data = JSON.parse(event.data);
+        console.log('Received', data.type, data.type === 'key' ? data.key : '');
+
         if (data.type === 'key') {
-            contacts[activePeer].sessionKey = data.key;
-            saveContacts();
-            // Перезагрузим сообщения, так как теперь ключ есть
-            if (activePeer) loadMessages(activePeer);
+            if (activePeer) {
+                contacts[activePeer].remoteKey = data.key;
+                saveContacts();
+                console.log('Stored remote key from partner:', data.key);
+                clearInterval(keySendInterval);
+                loadMessages(activePeer);
+            }
+            updateKeyDisplay();
         } else if (data.type === 'message') {
             handleIncomingMessage(activePeer, data);
         }
     };
 }
 
-function sendMessage() {
+async function sendMessage() {
     const text = $('message-input').value.trim();
     if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') {
         alert('No connection.');
         return;
     }
-    const sessionKey = contacts[activePeer]?.sessionKey;
-    if (!sessionKey) {
-        alert('Encryption key not yet exchanged. Please wait a moment.');
+    const remoteKey = contacts[activePeer]?.remoteKey;
+    if (!remoteKey) {
+        alert('Waiting for encryption key...');
         return;
     }
-    const packets = CryptoSystem.encryptDual(text, sessionKey);
-    const msgObj = { type: 'message', from: currentUser, packets, timestamp: Date.now() };
-    dataChannel.send(JSON.stringify(msgObj));
-    saveMessageToHistory(activePeer, msgObj);
-    $('message-input').value = '';
-    loadMessages(activePeer);
+    try {
+        const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
+        const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
+        dataChannel.send(JSON.stringify(msgObj));
+        saveMessageToHistory(activePeer, msgObj);
+        $('message-input').value = '';
+        loadMessages(activePeer);
+    } catch (e) {
+        console.error('Encryption failed:', e);
+        alert('Encryption failed. Check console.');
+    }
 }
 
-function handleIncomingMessage(peerId, data) {
+async function handleIncomingMessage(peerId, data) {
+    console.log('Handling incoming message from', peerId);
     saveMessageToHistory(peerId, data);
     if (peerId === activePeer) loadMessages(peerId);
 }
@@ -302,18 +318,21 @@ function saveMessageToHistory(peerId, msg) {
     localStorage.setItem(key, JSON.stringify(hist));
 }
 
-function loadMessages(peerId) {
+async function loadMessages(peerId) {
     const key = `history_${[currentUser, peerId].sort().join('_')}`;
     const hist = JSON.parse(localStorage.getItem(key) || '[]');
     const container = $('messages');
     container.innerHTML = '';
-    hist.forEach(msg => {
+    const localKey = contacts[peerId]?.localSessionKey;
+    const remoteKey = contacts[peerId]?.remoteKey;
+    for (const msg of hist) {
         const isMine = msg.from === currentUser;
-        const sessionKey = contacts[peerId]?.sessionKey;
         let content = '🔒 Encrypted';
-        if (sessionKey && msg.packets) {
-            const dec = CryptoSystem.decryptDual(msg.packets.p1, msg.packets.p2, sessionKey);
-            if (dec) content = dec.text;
+        // В зависимости от того, я ли отправитель, выбираем ключ для расшифровки
+        const decryptKey = isMine ? remoteKey : localKey;
+        if (decryptKey && msg.ciphertext) {
+            const decrypted = await CryptoSystem.decrypt(msg.ciphertext, decryptKey);
+            if (decrypted !== null) content = decrypted;
         }
         const div = document.createElement('div');
         div.className = `message ${isMine ? 'my-message' : 'other-message'}`;
@@ -324,13 +343,21 @@ function loadMessages(peerId) {
                 <button class="pin-btn" onclick="togglePin('${peerId}', ${msg.timestamp})">📌</button>
             </div>`;
         container.appendChild(div);
-    });
+    }
     container.scrollTop = container.scrollHeight;
 }
 
 function updateOnlineStatus() {
     const status = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Online' : '⚪ Disconnected';
     $('online-status').innerText = status;
+}
+
+function updateKeyDisplay() {
+    if (!activePeer) return;
+    const localKey = contacts[activePeer]?.localSessionKey;
+    const remoteKey = contacts[activePeer]?.remoteKey;
+    $('my-key-display').innerText = localKey ? localKey.slice(0, 8) + '...' : 'none';
+    $('partner-key-display').innerText = remoteKey ? remoteKey.slice(0, 8) + '...' : '(waiting...)';
 }
 
 function togglePin(peerId, ts) {
@@ -344,10 +371,17 @@ function togglePin(peerId, ts) {
     if (exists) pinned.splice(pinned.indexOf(exists), 1);
     else {
         let text = '🔒';
-        const sessionKey = contacts[peerId]?.sessionKey;
-        if (sessionKey && msg.packets) {
-            const dec = CryptoSystem.decryptDual(msg.packets.p1, msg.packets.p2, sessionKey);
-            if (dec) text = dec.text;
+        const localKey = contacts[peerId]?.localSessionKey;
+        const remoteKey = contacts[peerId]?.remoteKey;
+        const decryptKey = (msg.from === currentUser) ? remoteKey : localKey;
+        if (decryptKey && msg.ciphertext) {
+            CryptoSystem.decrypt(msg.ciphertext, decryptKey).then(dec => {
+                if (dec) text = dec;
+                pinned.push({ ts, text });
+                localStorage.setItem(pinnedKey, JSON.stringify(pinned));
+                loadPinned(peerId);
+            });
+            return;
         }
         pinned.push({ ts, text });
     }

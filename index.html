@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -27,6 +27,11 @@
                 </span>
                 <span class="online-status" id="online-status">⚪ Disconnected</span>
             </div>
+            <!-- Отладочная панель ключей -->
+            <div class="key-debug" id="key-debug">
+                <span>🔑 Your key: <code id="my-key-display"></code></span>
+                <span>🔑 Partner key: <code id="partner-key-display">(waiting...)</code></span>
+            </div>
             <div id="pinned-messages"></div>
             <div id="messages"></div>
             <div class="message-input-section">
@@ -40,15 +45,25 @@
                 <h3>New Chat</h3>
                 <div id="room-create">
                     <button onclick="createRoom()">Create Room</button>
-                    <p>or</p>
-                    <input type="text" id="join-room-input" placeholder="Room code">
+                    <p>— or —</p>
+                    <textarea id="offer-textarea" placeholder="Paste partner's offer here" rows="4"></textarea>
                     <button onclick="joinRoom()">Join Room</button>
                 </div>
-                <div id="room-created" class="hidden">
-                    <p>Room code (copied):</p>
-                    <div class="room-code" id="room-code-display"></div>
-                    <button onclick="closeNewRoomModal()">OK</button>
+                <div id="room-waiting" class="hidden">
+                    <p>Offer copied!<br>Send it to your partner.</p>
+                    <textarea id="offer-display" rows="4" readonly></textarea>
+                    <button onclick="copyOffer()">Copy again</button>
+                    <label>Answer from partner:</label>
+                    <textarea id="answer-textarea" rows="4" placeholder="Paste answer here"></textarea>
+                    <button onclick="completeConnection()">Complete</button>
                 </div>
+                <div id="room-joining" class="hidden">
+                    <p>Answer copied!<br>Send it back to your partner.</p>
+                    <textarea id="answer-display" rows="4" readonly></textarea>
+                    <button onclick="copyAnswer()">Copy again</button>
+                    <button onclick="closeNewRoomModal()">Done</button>
+                </div>
+                <button onclick="closeNewRoomModal()" style="margin-top:8px;">Cancel</button>
             </div>
         </div>
         <div class="modal hidden" id="settings-modal">
@@ -68,10 +83,6 @@
             </div>
         </div>
     </div>
-    <script type="module">
-  import { joinRoom, selfId } from 'https://cdn.jsdelivr.net/npm/@trystero-p2p/torrent@0.23.1/dist/trystero-torrent.min.js';
-  window.trystero = { joinRoom, selfId };
-</script>
     <script src="script.js"></script>
 </body>
 </html>

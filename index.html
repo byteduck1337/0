@@ -8,28 +8,26 @@
 </head>
 <body>
     <div id="app">
-        <div class="app-title">/0byte/</div>
-
-        <div class="user-info">
-            <div class="username-display">
-                <span class="username-text" id="username-display"></span>
-                <button class="copy-key-btn" onclick="copyMyKey()">Copy Key</button>
+        <div class="sidebar hidden" id="sidebar">
+            <div class="sidebar-header">
+                <span class="app-title">/0byte/</span>
+                <button onclick="showSettings()">⚙️</button>
+            </div>
+            <div class="contact-list" id="contact-list"></div>
+            <div class="sidebar-footer">
+                <button onclick="addContactPrompt()">New Chat</button>
             </div>
         </div>
-
-        <div class="partner-section">
-            <div class="input-group">
-                <input type="text" class="partner-input" id="partner-key-input" placeholder="Paste partner's key">
-                <button class="connect-btn" onclick="connectToPartner()">Connect</button>
-            </div>
-            <div class="status-message" id="connection-status"></div>
-        </div>
-
-        <div class="chat-section hidden" id="chat-section">
+        <div class="main hidden" id="main-chat">
             <div class="chat-header">
-                Chat with <span id="partner-name"></span>
+                <button class="back-btn" onclick="goBack()">←</button>
+                <span class="partner-info">
+                    <span class="partner-avatar" id="partner-avatar"></span>
+                    <span id="partner-name-display"></span>
+                </span>
                 <span class="online-status" id="online-status"></span>
             </div>
+            <div id="pinned-messages"></div>
             <div id="messages"></div>
             <div class="message-input-section">
                 <input type="text" class="message-input" id="message-input" placeholder="Type a message..."
@@ -37,15 +35,28 @@
                 <button class="send-btn" onclick="sendMessage()">➤</button>
             </div>
         </div>
-
-        <div class="chat-section hidden" id="waiting-section">
-            <div class="waiting-indicator">
-                <h3>Waiting for partner...</h3>
-                <p></p>
+        <div class="settings-modal hidden" id="settings-modal">
+            <div class="modal-content">
+                <h3>Settings</h3>
+                <label>Your Name: <input type="text" id="name-input"></label>
+                <label>Avatar (emoji): <input type="text" id="avatar-input" maxlength="4"></label>
+                <label>Gist URL: <input type="text" id="gist-url-input" placeholder="https://gist.github.com/..."></label>
+                <label>Token: <input type="password" id="token-input"></label>
+                <button onclick="saveSettings()">Save</button>
+                <button onclick="closeSettings()">Close</button>
+                <div id="settings-status"></div>
+            </div>
+        </div>
+        <div class="add-contact-modal hidden" id="add-contact-modal">
+            <div class="modal-content">
+                <h3>Add Contact</h3>
+                <input type="text" id="new-contact-key" placeholder="Paste partner's encryption key">
+                <button onclick="connectToPartner()">Connect</button>
+                <button onclick="closeAddContact()">Cancel</button>
+                <div id="connection-status"></div>
             </div>
         </div>
     </div>
-
     <script src="script.js"></script>
 </body>
 </html>

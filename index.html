@@ -3,19 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>/0byte/</title>
+    <title>/0byte/ – P2P Messenger</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <div id="app">
-        <div class="sidebar hidden" id="sidebar">
+        <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <span class="app-title">/0byte/</span>
                 <button onclick="showSettings()">⚙️</button>
             </div>
             <div class="contact-list" id="contact-list"></div>
             <div class="sidebar-footer">
-                <button onclick="addContactPrompt()">New Chat</button>
+                <button onclick="addContactPrompt()">+ New Chat</button>
             </div>
         </div>
         <div class="main hidden" id="main-chat">
@@ -38,19 +38,19 @@
         <div class="settings-modal hidden" id="settings-modal">
             <div class="modal-content">
                 <h3>Settings</h3>
-                <label>Your Name: <input type="text" id="name-input"></label>
+                <label>Name: <input type="text" id="name-input"></label>
                 <label>Avatar (emoji): <input type="text" id="avatar-input" maxlength="4"></label>
-                <label>Gist URL: <input type="text" id="gist-url-input" placeholder="https://gist.github.com/..."></label>
+                <label>Gist URL: <input type="text" id="gist-url-input"></label>
                 <label>Token: <input type="password" id="token-input"></label>
                 <button onclick="saveSettings()">Save</button>
-                <button onclick="closeSettings()">Close</button>
+                <button onclick="closeSettings()">Cancel</button>
                 <div id="settings-status"></div>
             </div>
         </div>
         <div class="add-contact-modal hidden" id="add-contact-modal">
             <div class="modal-content">
                 <h3>Add Contact</h3>
-                <input type="text" id="new-contact-key" placeholder="Paste partner's encryption key">
+                <input type="text" id="new-contact-key" placeholder="Partner's key">
                 <button onclick="connectToPartner()">Connect</button>
                 <button onclick="closeAddContact()">Cancel</button>
                 <div id="connection-status"></div>

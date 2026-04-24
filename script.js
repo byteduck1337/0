@@ -255,10 +255,7 @@ function loadMessages() {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${isMyMessage ? 'my-message' : 'other-message'}`;
         messageDiv.innerHTML = `
-            <div class="message-bubble">
-                ${cached.message}
-                <span class="encrypted-badge">🔒</span>
-            </div>
+            <div class="message-bubble">${cached.message}</div>
             <div class="message-meta">${new Date(cached.timestamp).toLocaleTimeString()}</div>
         `;
         messagesContainer.appendChild(messageDiv);
@@ -283,16 +280,13 @@ function loadMessages() {
 
         if (decrypted) {
             messageDiv.innerHTML = `
-                <div class="message-bubble">
-                    ${decrypted.message}
-                    <span class="encrypted-badge">🔒</span>
-                </div>
+                <div class="message-bubble">${decrypted.message}</div>
                 <div class="message-meta">${new Date(decrypted.timestamp).toLocaleTimeString()}</div>
             `;
         } else {
             messageDiv.innerHTML = `
                 <div class="message-bubble" style="opacity:0.6;background:#e2e8f0;color:#475569;">
-                    🔒 Encrypted
+                    Encrypted message
                 </div>
                 <div class="message-meta">${new Date(msg.timestamp).toLocaleTimeString()}</div>
             `;

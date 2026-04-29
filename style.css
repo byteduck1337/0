@@ -882,3 +882,19 @@ details summary:hover {
     height: 20px;
     cursor: pointer;
 }
+.btn-danger {
+    flex: 1;
+    padding: 12px;
+    background: transparent;
+    color: #ef4444;
+    border: 1px solid #ef4444;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all var(--transition);
+}
+
+.btn-danger:hover {
+    background: #ef4444;
+    color: white;
+}

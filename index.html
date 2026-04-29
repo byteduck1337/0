@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>/0byte/ — защищённый чат</title>
+  <title>/0byte/ — (0SPM)</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -11,10 +11,8 @@
 </head>
 <body>
   <div id="app">
-    <!-- Кнопка переключения боковой панели (мобильные) -->
     <button id="sidebar-toggle" class="sidebar-toggle" aria-label="Чаты">☰</button>
 
-    <!-- Боковая панель (список чатов) -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
         <h1 class="app-title">/0byte/</h1>
@@ -29,8 +27,7 @@
       </div>
     </aside>
 
-    <!-- Основная область чата -->
-    <main class="main" id="main-chat">
+    <main class="main hidden" id="main-chat">
       <div class="chat-header">
         <div class="chat-header-info">
           <span class="chat-avatar" id="chat-avatar"></span>
@@ -96,7 +93,6 @@
         <button onclick="closeNewChat()" class="icon-btn">✕</button>
       </div>
       <div class="modal-body">
-        <!-- Шаг 1: выбор сценария -->
         <div id="role-select-section">
           <div class="chat-role-options">
             <button onclick="startHostFlow()" class="role-card">
@@ -112,7 +108,6 @@
           </div>
         </div>
 
-        <!-- Шаг 2: Хост — отображение приглашения и поле для ответа -->
         <div id="host-flow" class="hidden">
           <div class="step-indicator">Вы создаёте чат</div>
           <div id="host-invite-area" class="step-content">
@@ -138,7 +133,6 @@
           </div>
         </div>
 
-        <!-- Шаг 2: Гость — вставка приглашения -->
         <div id="join-flow" class="hidden">
           <div class="step-indicator">Вы присоединяетесь</div>
           <div id="join-input-area" class="step-content">
@@ -196,7 +190,6 @@
     </div>
   </div>
 
-  <!-- Подключаем модули в строгом порядке -->
   <script src="crypto.js"></script>
   <script src="webrtc.js"></script>
   <script src="ui.js"></script>

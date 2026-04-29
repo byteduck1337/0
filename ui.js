@@ -1,6 +1,6 @@
 ﻿// ui.js
 // Весь интерфейс: рендеринг, модальные окна, настройки, визуализация.
-// Все обращения к DOM-элементам проверяются на существование.
+// Добавлена поддержка мастер-пароля.
 
 function $(id) {
     const el = document.getElementById(id);
@@ -8,11 +8,106 @@ function $(id) {
     return el;
 }
 
-// Безопасное получение элемента (без предупреждений)
 function getEl(id) { return document.getElementById(id); }
 
+// ==================== Мастер-пароль ====================
+async function showMasterPasswordPrompt(isFirstTime = false) {
+    return new Promise((resolve) => {
+        const existingModal = document.querySelector('.master-password-modal');
+        if (existingModal) existingModal.remove();
+        
+        const modal = document.createElement('div');
+        modal.className = 'master-password-modal';
+        modal.innerHTML = `
+            <div class="master-password-content">
+                <h2>🔐 ${isFirstTime ? 'Создайте мастер-пароль' : 'Введите мастер-пароль'}</h2>
+                <p>${isFirstTime ? 'Защитит ваши ключи и историю чатов. Не потеряйте его!' : 'Необходим для расшифровки данных.'}</p>
+                <input type="password" id="master-password-input" placeholder="Мастер-пароль" autocomplete="off" />
+                ${isFirstTime ? '<input type="password" id="master-password-confirm" placeholder="Подтвердите пароль" autocomplete="off" />' : ''}
+                <button class="btn-primary" id="master-password-submit">${isFirstTime ? 'Создать' : 'Войти'}</button>
+                <div class="master-error" id="master-error"></div>
+                ${!isFirstTime ? '<p style="margin-top: 12px; font-size: 0.8rem; color: var(--text-secondary);">Если забыли пароль — данные потеряны.</p>' : ''}
+            </div>
+        `;
+        document.body.appendChild(modal);
+        
+        const submitBtn = document.getElementById('master-password-submit');
+        const errorEl = document.getElementById('master-error');
+        const passwordInput = document.getElementById('master-password-input');
+        
+        submitBtn.onclick = async () => {
+            const password = passwordInput.value.trim();
+            if (!password || password.length < 6) {
+                errorEl.textContent = 'Пароль должен быть не менее 6 символов';
+                return;
+            }
+            
+            if (isFirstTime) {
+                const confirmInput = document.getElementById('master-password-confirm');
+                if (password !== confirmInput.value.trim()) {
+                    errorEl.textContent = 'Пароли не совпадают';
+                    return;
+                }
+            }
+            
+            try {
+                if (isFirstTime) {
+                    // Проверяем, что можем зашифровать
+                    const test = await CryptoSystem.encryptWithMaster('test', password);
+                    if (!test) {
+                        errorEl.textContent = 'Ошибка создания ключа';
+                        return;
+                    }
+                } else {
+                    // Проверяем, что можем расшифровать
+                    const encrypted = localStorage.getItem('contacts_encrypted');
+                    if (encrypted) {
+                        const test = await CryptoSystem.decryptWithMaster(encrypted, password);
+                        if (test === null) {
+                            errorEl.textContent = 'Неверный пароль';
+                            return;
+                        }
+                    } else {
+                        // Старые данные без шифрования
+                        const oldContacts = localStorage.getItem('contacts');
+                        if (oldContacts) {
+                            const encrypted = await CryptoSystem.encryptWithMaster(oldContacts, password);
+                            localStorage.setItem('contacts_encrypted', encrypted);
+                            localStorage.removeItem('contacts');
+                            
+                            // Мигрируем историю
+                            const allKeys = Object.keys(localStorage).filter(k => k.startsWith('history_'));
+                            for (const key of allKeys) {
+                                const hist = localStorage.getItem(key);
+                                if (hist) {
+                                    const encryptedHist = await CryptoSystem.encryptWithMaster(hist, password);
+                                    localStorage.setItem(key + '_enc', encryptedHist);
+                                    localStorage.removeItem(key);
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                masterPassword = password;
+                modal.remove();
+                resolve();
+            } catch (e) {
+                errorEl.textContent = 'Ошибка: ' + e.message;
+            }
+        };
+        
+        // Enter для отправки
+        passwordInput.onkeydown = (e) => {
+            if (e.key === 'Enter') submitBtn.click();
+        };
+        
+        passwordInput.focus();
+    });
+}
+
 // ==================== Настройки и контакты ====================
-function loadSettings() {
+async function loadSettings() {
     myName = localStorage.getItem('myName') || 'Вы';
     myAvatar = localStorage.getItem('myAvatar') || '';
     currentUser = localStorage.getItem('uid');
@@ -26,17 +121,35 @@ function loadSettings() {
     const avatarInput = getEl('avatar-input');
     if (avatarInput) avatarInput.value = myAvatar;
 
-    contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
+    // Загружаем контакты с мастер-паролем
+    if (masterPassword) {
+        const encrypted = localStorage.getItem('contacts_encrypted');
+        if (encrypted) {
+            const json = await CryptoSystem.decryptWithMaster(encrypted, masterPassword);
+            contacts = json ? JSON.parse(json) : {};
+        } else {
+            const oldContacts = localStorage.getItem('contacts');
+            if (oldContacts) {
+                contacts = JSON.parse(oldContacts);
+                await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+                localStorage.removeItem('contacts');
+            } else {
+                contacts = {};
+            }
+        }
+    } else {
+        contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
+    }
+    
     renderContactList();
 
-    // Восстановление активного чата
     const savedActivePeer = localStorage.getItem('activePeer');
     if (savedActivePeer && contacts[savedActivePeer]) {
         activePeer = savedActivePeer;
         openChat(activePeer);
     } else {
-        const mainChat = getEl('main-chat');
-        const sidebar = getEl('sidebar');
+        const mainChat = $('main-chat');
+        const sidebar = $('sidebar');
         if (mainChat) mainChat.classList.add('hidden');
         if (sidebar) sidebar.classList.remove('hidden');
     }
@@ -63,27 +176,37 @@ function renderContactList() {
     });
 }
 
-function deleteChat(peerId) {
+async function deleteChat(peerId) {
     if (!confirm('Удалить чат и историю с ' + (contacts[peerId]?.name || peerId) + '?')) return;
     const histKey = `history_${[currentUser, peerId].sort().join('_')}`;
-    localStorage.removeItem(histKey);
-    localStorage.removeItem(`pinned_${peerId}`);
+    const pinnedKey = `pinned_${peerId}`;
+    
+    if (masterPassword) {
+        localStorage.removeItem(`hist_${histKey}`);
+    } else {
+        localStorage.removeItem(histKey);
+    }
+    localStorage.removeItem(pinnedKey);
     localStorage.removeItem(`role_${peerId}`);
     delete contacts[peerId];
-    saveContacts();
+    await saveContacts();
     if (activePeer === peerId) {
         activePeer = null;
         localStorage.removeItem('activePeer');
-        const mainChat = getEl('main-chat');
-        const sidebar = getEl('sidebar');
+        const mainChat = $('main-chat');
+        const sidebar = $('sidebar');
         if (mainChat) mainChat.classList.add('hidden');
         if (sidebar) sidebar.classList.remove('hidden');
     }
     renderContactList();
 }
 
-function saveContacts() {
-    localStorage.setItem('contacts', JSON.stringify(contacts));
+async function saveContacts() {
+    if (masterPassword) {
+        await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+    } else {
+        localStorage.setItem('contacts', JSON.stringify(contacts));
+    }
 }
 
 // ==================== Управление чатом (UI) ====================
@@ -94,28 +217,24 @@ function openChat(peerId) {
         renderContactList();
     }
 
-    // Если уже есть активное соединение с этим пиром
     if (dataChannel && dataChannel.readyState === 'open' && connectedPeerId === peerId) {
         updateUIForPeer(peerId);
         return;
     }
 
-    // Если есть сохранённая сессия
     if (contacts[peerId].localSessionKey) {
         pendingLocalKey = contacts[peerId].localSessionKey;
         connectedPeerId = peerId;
         setupPeerConnection(peerId);
         updateUIForPeer(peerId);
         
-        // Проверяем через 5 секунд, установилось ли соединение
         setTimeout(() => {
             if (!dataChannel || dataChannel.readyState !== 'open') {
-                const restorePanel = getEl('restore-panel');
+                const restorePanel = $('restore-panel');
                 if (restorePanel) restorePanel.classList.add('visible');
             }
         }, 5000);
     } else {
-        // Новая сессия
         pendingLocalKey = CryptoSystem.generateKey();
         contacts[peerId].localSessionKey = pendingLocalKey;
         saveContacts();
@@ -128,7 +247,6 @@ function openChat(peerId) {
 function restoreChat() {
     const peerId = activePeer || connectedPeerId;
     if (!peerId) return;
-    
     restoreSession(peerId);
 }
 
@@ -137,29 +255,27 @@ function updateUIForPeer(peerId) {
     activePeer = peerId;
     localStorage.setItem('activePeer', peerId);
     
-    const mainChat = getEl('main-chat');
-    const sidebar = getEl('sidebar');
+    const mainChat = $('main-chat');
+    const sidebar = $('sidebar');
     
-    // Показываем основной чат
     if (mainChat) {
         mainChat.classList.remove('hidden');
         mainChat.style.display = 'flex';
     }
     
-    // Скрываем боковую панель на мобильных
     if (sidebar && window.innerWidth <= 700) {
         sidebar.classList.remove('visible');
         sidebar.classList.add('hidden');
     }
 
     const peer = contacts[peerId] || {};
-    const chatName = getEl('chat-name');
+    const chatName = $('chat-name');
     if (chatName) chatName.textContent = peer.name || peerId.slice(0, 8);
     
-    const chatAvatar = getEl('chat-avatar');
+    const chatAvatar = $('chat-avatar');
     if (chatAvatar) chatAvatar.textContent = peer.avatar || '👤';
     
-    const chatStatus = getEl('chat-status');
+    const chatStatus = $('chat-status');
     if (chatStatus) {
         const isConnected = dataChannel && dataChannel.readyState === 'open';
         chatStatus.textContent = isConnected ? 'онлайн' : 'подключение...';
@@ -170,18 +286,17 @@ function updateUIForPeer(peerId) {
     loadPinned(peerId);
     renderContactList();
 
-    // Скрываем панель восстановления, если соединение активно
     if (dataChannel && dataChannel.readyState === 'open') {
-        const restorePanel = getEl('restore-panel');
+        const restorePanel = $('restore-panel');
         if (restorePanel) restorePanel.classList.remove('visible');
     }
 }
 
 async function loadMessages(peerId) {
-    const container = getEl('messages');
+    const container = $('messages');
     if (!container) return;
-    const key = `history_${[currentUser, peerId].sort().join('_')}`;
-    const hist = JSON.parse(localStorage.getItem(key) || '[]');
+    
+    const hist = await loadMessageHistory(peerId);
     container.innerHTML = '';
     const localKey = contacts[peerId]?.localSessionKey;
     const remoteKey = contacts[peerId]?.remoteKey;
@@ -227,30 +342,29 @@ async function loadMessages(peerId) {
         div.innerHTML = `
             <div class="message-content">${content}</div>
             <div class="message-time">${new Date(msg.timestamp).toLocaleTimeString()}</div>
+            <button class="pin-btn" onclick="togglePin('${peerId}', ${msg.timestamp})" style="background: none; border: none; cursor: pointer; font-size: 0.8rem;">📌</button>
         `;
         container.appendChild(div);
     }
     
-    // Прокрутка вниз
     setTimeout(() => {
         container.scrollTop = container.scrollHeight;
     }, 100);
 }
 
 function updateOnlineStatus() {
-    const onlineStatusEl = getEl('online-status');
+    const onlineStatusEl = $('online-status');
     if (onlineStatusEl) {
         const status = (dataChannel && dataChannel.readyState === 'open') ? '🟢 Онлайн' : '⚪ Отключен';
         onlineStatusEl.innerText = status;
     }
     
-    const chatStatusEl = getEl('chat-status');
+    const chatStatusEl = $('chat-status');
     if (chatStatusEl && activePeer) {
         chatStatusEl.textContent = (dataChannel && dataChannel.readyState === 'open') ? 'онлайн' : 'офлайн';
     }
     
-    // Управление панелью восстановления
-    const restorePanel = getEl('restore-panel');
+    const restorePanel = $('restore-panel');
     if (restorePanel && activePeer) {
         if (dataChannel && dataChannel.readyState === 'open') {
             restorePanel.classList.remove('visible');
@@ -260,15 +374,14 @@ function updateOnlineStatus() {
 
 function updateKeyDisplay() {
     if (!activePeer) return;
-    const myKeyEl = getEl('my-key-display');
-    const partnerKeyEl = getEl('partner-key-display');
+    const myKeyEl = $('my-key-display');
+    const partnerKeyEl = $('partner-key-display');
     const localKey = contacts[activePeer]?.localSessionKey;
     const remoteKey = contacts[activePeer]?.remoteKey;
     if (myKeyEl) myKeyEl.innerText = localKey ? localKey.slice(0, 8) + '...' : 'none';
     if (partnerKeyEl) partnerKeyEl.innerText = remoteKey ? remoteKey.slice(0, 8) + '...' : '(ожидание...)';
 }
 
-// Обработка загрузки изображения
 function handleImageUpload(event) {
     const file = event.target.files[0];
     if (file) {
@@ -277,15 +390,15 @@ function handleImageUpload(event) {
     }
 }
 
-// Закреплённые сообщения
-function togglePin(peerId, ts) {
-    const key = `history_${[currentUser, peerId].sort().join('_')}`;
-    const hist = JSON.parse(localStorage.getItem(key) || '[]');
+async function togglePin(peerId, ts) {
+    const hist = await loadMessageHistory(peerId);
     const msg = hist.find(m => m.timestamp === ts);
     if (!msg) return;
+    
     const pinnedKey = `pinned_${peerId}`;
-    const pinned = JSON.parse(localStorage.getItem(pinnedKey) || '[]');
+    let pinned = JSON.parse(localStorage.getItem(pinnedKey) || '[]');
     const exists = pinned.find(p => p.ts === ts);
+    
     if (exists) {
         pinned = pinned.filter(p => p.ts !== ts);
     } else {
@@ -295,51 +408,45 @@ function togglePin(peerId, ts) {
         } else if (msg.ciphertext) {
             const decryptKey = (msg.from === currentUser) ? contacts[peerId]?.remoteKey : contacts[peerId]?.localSessionKey;
             if (decryptKey) {
-                CryptoSystem.decrypt(msg.ciphertext, decryptKey).then(dec => {
-                    if (dec) {
-                        text = dec;
-                        pinned.push({ ts, text });
-                        localStorage.setItem(pinnedKey, JSON.stringify(pinned));
-                        loadPinned(peerId);
-                    }
-                });
-                return;
+                const dec = await CryptoSystem.decrypt(msg.ciphertext, decryptKey);
+                text = dec ? dec : '🔒 Зашифровано';
+            } else {
+                text = '🔒 Зашифровано';
             }
         }
         pinned.push({ ts, text });
     }
+    
     localStorage.setItem(pinnedKey, JSON.stringify(pinned));
     loadPinned(peerId);
 }
 
 function loadPinned(peerId) {
-    const pinnedMsgs = getEl('pinned-messages');
+    const pinnedMsgs = $('pinned-messages');
     if (!pinnedMsgs) return;
     const pinned = JSON.parse(localStorage.getItem(`pinned_${peerId}`) || '[]');
     pinnedMsgs.innerHTML = pinned.length ? pinned.map(p => `📌 ${p.text}`).join(' | ') : 'Нет закреплённых сообщений';
 }
 
 function togglePinnedPanel() {
-    const panel = getEl('pinned-panel');
+    const panel = $('pinned-panel');
     if (panel) panel.classList.toggle('visible');
 }
 
 // ==================== Модальные окна и flow ====================
 function showNewChat() {
     resetToRoleSelect();
-    const modal = getEl('new-chat-modal');
+    const modal = $('new-chat-modal');
     if (modal) modal.classList.remove('hidden');
 }
 
 function closeNewChat() {
-    const modal = getEl('new-chat-modal');
+    const modal = $('new-chat-modal');
     if (modal) modal.classList.add('hidden');
-    // Не сбрасываем соединение при закрытии модалки!
 }
 
 function resetToRoleSelect() {
     showSection('role-select-section');
-    // Сбрасываем видимость step-content
     document.querySelectorAll('.step-content').forEach(el => {
         el.classList.remove('visible');
     });
@@ -353,7 +460,6 @@ function showSection(sectionId) {
     const target = getEl(sectionId);
     if (target) target.classList.remove('hidden');
     
-    // Сбрасываем анимации
     document.querySelectorAll('.step-content').forEach(el => {
         el.classList.remove('visible');
     });
@@ -361,12 +467,12 @@ function showSection(sectionId) {
 
 async function startHostFlow() {
     showSection('host-flow');
-    const hostInviteArea = getEl('host-invite-area');
-    const hostResponseArea = getEl('host-response-area');
-    const hostWaiting = getEl('host-waiting');
-    const hostConnectBtn = getEl('host-connect-btn');
-    const hostAnswerInput = getEl('host-answer-input');
-    const hostOfferWords = getEl('host-offer-words');
+    const hostInviteArea = $('host-invite-area');
+    const hostResponseArea = $('host-response-area');
+    const hostWaiting = $('host-waiting');
+    const hostConnectBtn = $('host-connect-btn');
+    const hostAnswerInput = $('host-answer-input');
+    const hostOfferWords = $('host-offer-words');
 
     if (hostInviteArea) setTimeout(() => hostInviteArea.classList.add('visible'), 100);
     if (hostResponseArea) setTimeout(() => hostResponseArea.classList.add('visible'), 200);
@@ -385,23 +491,22 @@ async function startHostFlow() {
         contacts[connectedPeerId].localSessionKey = pendingLocalKey;
         contacts[connectedPeerId].role = 'host';
         localStorage.setItem(`role_${connectedPeerId}`, 'host');
-        saveContacts();
+        await saveContacts();
 
-        setupPeerConnectionForHost();
+        await setupPeerConnectionForHost();
 
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
         await waitForIceGathering();
 
         const finalOffer = peerConnection.localDescription;
-        const hostOfferDisplay = getEl('host-offer-display');
+        const hostOfferDisplay = $('host-offer-display');
         if (hostOfferDisplay) hostOfferDisplay.value = JSON.stringify(finalOffer);
         if (hostOfferWords) hostOfferWords.textContent = sdpToWords(finalOffer.sdp);
         
-        // Копируем в буфер обмена
         copyToClipboard(JSON.stringify(finalOffer));
         
-        const shareBtn = getEl('share-host-btn');
+        const shareBtn = $('share-host-btn');
         if (shareBtn && navigator.share) shareBtn.style.display = '';
     } catch (e) {
         alert('Ошибка создания приглашения');
@@ -411,17 +516,31 @@ async function startHostFlow() {
 }
 
 async function hostSubmitAnswer() {
-    const hostAnswerInput = getEl('host-answer-input');
+    const hostAnswerInput = $('host-answer-input');
     if (!hostAnswerInput) return;
     const answerStr = hostAnswerInput.value.trim();
     if (!answerStr) return;
     
     try {
         const answer = JSON.parse(answerStr);
+        
+        // Верификация отпечатка
+        const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
+        const remoteFp = CryptoSystem.extractFingerprint(answer.sdp);
+        
+        const verified = await verifyFingerprint(connectedPeerId, localFp, remoteFp);
+        if (!verified) {
+            alert('Отпечатки не совпадают! Возможна атака "человек посередине".');
+            return;
+        }
+        
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         
-        const hostResponseArea = getEl('host-response-area');
-        const hostWaiting = getEl('host-waiting');
+        // Настраиваем data channel после получения ответа
+        setupDataChannel(connectedPeerId, 'host');
+        
+        const hostResponseArea = $('host-response-area');
+        const hostWaiting = $('host-waiting');
         
         if (hostResponseArea) hostResponseArea.classList.remove('visible');
         if (hostWaiting) {
@@ -438,11 +557,11 @@ async function hostSubmitAnswer() {
 
 function startJoinFlow() {
     showSection('join-flow');
-    const joinInputArea = getEl('join-input-area');
-    const joinResponseArea = getEl('join-response-area');
-    const joinWaiting = getEl('join-waiting');
-    const joinGenerateBtn = getEl('join-generate-btn');
-    const joinOfferInput = getEl('join-offer-input');
+    const joinInputArea = $('join-input-area');
+    const joinResponseArea = $('join-response-area');
+    const joinWaiting = $('join-waiting');
+    const joinGenerateBtn = $('join-generate-btn');
+    const joinOfferInput = $('join-offer-input');
 
     if (joinInputArea) setTimeout(() => joinInputArea.classList.add('visible'), 100);
     if (joinResponseArea) {
@@ -455,13 +574,17 @@ function startJoinFlow() {
 }
 
 async function joinSubmitOffer() {
-    const joinOfferInput = getEl('join-offer-input');
+    const joinOfferInput = $('join-offer-input');
     if (!joinOfferInput) return;
     const offerStr = joinOfferInput.value.trim();
     if (!offerStr) return;
     
     try {
         const offer = JSON.parse(offerStr);
+        
+        // Верификация отпечатка
+        const remoteFp = CryptoSystem.extractFingerprint(offer.sdp);
+        
         connectedPeerId = CryptoSystem.generateKey().slice(0, 16);
         pendingLocalKey = CryptoSystem.generateKey();
         
@@ -471,17 +594,25 @@ async function joinSubmitOffer() {
         contacts[connectedPeerId].localSessionKey = pendingLocalKey;
         contacts[connectedPeerId].role = 'guest';
         localStorage.setItem(`role_${connectedPeerId}`, 'guest');
-        saveContacts();
+        await saveContacts();
 
         const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
         peerConnection = new RTCPeerConnection(configuration);
         
-        peerConnection.ondatachannel = (event) => {
+        peerConnection.ondatachannel = async (event) => {
             console.log('Получен data channel от хоста');
             dataChannel = event.channel;
-            setupDataChannel(connectedPeerId);
             
-            // Когда data channel откроется, UI обновится через setupDataChannel
+            // Верификация отпечатка после получения канала
+            const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
+            const verified = await verifyFingerprint(connectedPeerId, localFp, remoteFp);
+            if (!verified) {
+                alert('Отпечатки не совпадают! Возможна атака "человек посередине".');
+                dataChannel.close();
+                return;
+            }
+            
+            setupDataChannel(connectedPeerId, 'guest');
         };
         
         peerConnection.oniceconnectionstatechange = updateOnlineStatus;
@@ -496,18 +627,17 @@ async function joinSubmitOffer() {
         await waitForIceGathering();
 
         const finalAnswer = peerConnection.localDescription;
-        const joinAnswerDisplay = getEl('join-answer-display');
-        const joinAnswerWords = getEl('join-answer-words');
+        const joinAnswerDisplay = $('join-answer-display');
+        const joinAnswerWords = $('join-answer-words');
         
         if (joinAnswerDisplay) joinAnswerDisplay.value = JSON.stringify(finalAnswer);
         if (joinAnswerWords) joinAnswerWords.textContent = sdpToWords(finalAnswer.sdp);
         
-        // Копируем в буфер обмена
         copyToClipboard(JSON.stringify(finalAnswer));
 
-        const joinInputArea = getEl('join-input-area');
-        const joinResponseArea = getEl('join-response-area');
-        const joinWaiting = getEl('join-waiting');
+        const joinInputArea = $('join-input-area');
+        const joinResponseArea = $('join-response-area');
+        const joinWaiting = $('join-waiting');
         
         if (joinInputArea) joinInputArea.classList.remove('visible');
         if (joinResponseArea) {
@@ -515,7 +645,7 @@ async function joinSubmitOffer() {
             setTimeout(() => joinResponseArea.classList.add('visible'), 100);
         }
         
-        const shareBtn = getEl('share-join-btn');
+        const shareBtn = $('share-join-btn');
         if (shareBtn && navigator.share) shareBtn.style.display = '';
         
         if (joinWaiting) {
@@ -542,33 +672,33 @@ function copyToClipboard(text) {
 }
 
 function copyHostOffer() {
-    const el = getEl('host-offer-display');
+    const el = $('host-offer-display');
     if (el) copyToClipboard(el.value);
 }
 function shareHostOffer() {
-    const el = getEl('host-offer-display');
+    const el = $('host-offer-display');
     if (el && navigator.share) navigator.share({ title: 'Приглашение в /0byte/', text: el.value });
 }
 function copyJoinAnswer() {
-    const el = getEl('join-answer-display');
+    const el = $('join-answer-display');
     if (el) copyToClipboard(el.value);
 }
 function shareJoinAnswer() {
-    const el = getEl('join-answer-display');
+    const el = $('join-answer-display');
     if (el && navigator.share) navigator.share({ title: 'Ответ на приглашение в /0byte/', text: el.value });
 }
 
 function showSettings() {
-    const modal = getEl('settings-modal');
+    const modal = $('settings-modal');
     if (modal) modal.classList.remove('hidden');
 }
 function closeSettings() {
-    const modal = getEl('settings-modal');
+    const modal = $('settings-modal');
     if (modal) modal.classList.add('hidden');
 }
-function saveSettings() {
-    const nameInput = getEl('name-input');
-    const avatarInput = getEl('avatar-input');
+async function saveSettings() {
+    const nameInput = $('name-input');
+    const avatarInput = $('avatar-input');
     myName = nameInput ? nameInput.value.trim() || 'Вы' : 'Вы';
     myAvatar = avatarInput ? avatarInput.value.trim() || '' : '';
     localStorage.setItem('myName', myName);
@@ -577,14 +707,14 @@ function saveSettings() {
     renderContactList();
 }
 function toggleTheme() {
-    const toggle = getEl('theme-toggle');
+    const toggle = $('theme-toggle');
     if (toggle) {
         document.body.classList.toggle('light', !toggle.checked);
         localStorage.setItem('theme', toggle.checked ? 'dark' : 'light');
     }
 }
 function loadTheme() {
-    const toggle = getEl('theme-toggle');
+    const toggle = $('theme-toggle');
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'light') {
         document.body.classList.add('light');
@@ -595,8 +725,8 @@ function loadTheme() {
     }
 }
 function toggleSidebar() {
-    const sidebar = getEl('sidebar');
-    const mainChat = getEl('main-chat');
+    const sidebar = $('sidebar');
+    const mainChat = $('main-chat');
     if (sidebar) sidebar.classList.toggle('visible');
     if (mainChat) mainChat.classList.toggle('shifted');
 }

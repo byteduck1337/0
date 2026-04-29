@@ -1,7 +1,3 @@
-﻿// webrtc.js
-// Управление WebRTC соединением, data-каналом и обменом зашифрованными сообщениями.
-
-// Слова для визуальной маскировки SDP
 const WORD_LIST = [
     'Альфа', 'Браво', 'Чарли', 'Дельта', 'Эхо', 'Фокстрот', 'Гольф', 'Отель',
     'Индия', 'Джульет', 'Кило', 'Лима', 'Майк', 'Ноябрь', 'Оскар', 'Папа',
@@ -13,12 +9,11 @@ const WORD_LIST = [
 ];
 
 function sdpToWords(sdp) {
-    const fpMatch = sdp.match(/a=fingerprint:(sha-\d+) (\S+)/);
-    if (!fpMatch) return 'Неизвестная сессия';
-    const fingerprint = fpMatch[2].replace(/:/g, '');
+    const fp = CryptoSystem.extractFingerprint(sdp);
+    if (!fp) return 'Неизвестная сессия';
     let seed = 0;
-    for (let i = 0; i < fingerprint.length; i++) {
-        seed = ((seed << 5) - seed) + fingerprint.charCodeAt(i);
+    for (let i = 0; i < fp.length; i++) {
+        seed = ((seed << 5) - seed) + fp.charCodeAt(i);
         seed |= 0;
     }
     const words = [];
@@ -30,7 +25,7 @@ function sdpToWords(sdp) {
     return words.join(' · ');
 }
 
-// Глобальное состояние (будет инициализировано в app.js)
+// Глобальное состояние
 let currentUser, myName = 'Вы', myAvatar = '';
 let contacts = {};
 let activePeer = null;
@@ -38,11 +33,12 @@ let peerConnection = null;
 let dataChannel = null;
 let pendingLocalKey = null;
 let keySendInterval = null;
-let connectedPeerId = null; // идентификатор собеседника для текущего WebRTC-соединения
+let connectedPeerId = null;
+let masterPassword = null;
+let verifiedFingerprints = {}; // Кеш проверенных отпечатков
 
-// Настройка WebRTC (вызывается из ui.js для открытия чата или из flow)
+// Настройка WebRTC
 function setupPeerConnection(peerId) {
-    // Закрываем предыдущее соединение
     if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
@@ -65,15 +61,18 @@ function setupPeerConnection(peerId) {
         updateOnlineStatus();
     };
 
+    // Хост создаёт data channel
     dataChannel = peerConnection.createDataChannel('chat', { ordered: true });
-    setupDataChannel(peerId);
+    setupDataChannel(peerId, 'host');
 }
 
-function setupDataChannel(peerId) {
+function setupDataChannel(peerId, role = 'unknown') {
     if (!dataChannel) return;
 
-    dataChannel.onopen = () => {
+    dataChannel.onopen = async () => {
         console.log('Data channel открыт, отправляю ключ');
+        
+        // Отправка ключа
         if (pendingLocalKey) {
             const sendKey = () => {
                 if (!dataChannel || dataChannel.readyState !== 'open') return;
@@ -83,24 +82,22 @@ function setupDataChannel(peerId) {
             if (keySendInterval) clearInterval(keySendInterval);
             keySendInterval = setInterval(sendKey, 400);
         }
+        
         updateOnlineStatus();
 
-        // Сохраняем роль для восстановления
         if (connectedPeerId && contacts[connectedPeerId]) {
-            const role = localStorage.getItem(`role_${connectedPeerId}`);
-            if (role && !contacts[connectedPeerId].role) {
-                contacts[connectedPeerId].role = role;
-                saveContacts();
+            const roleSaved = localStorage.getItem(`role_${connectedPeerId}`);
+            if (roleSaved && !contacts[connectedPeerId].role) {
+                contacts[connectedPeerId].role = roleSaved;
+                await saveContactsSecure();
             }
         }
 
-        // Автозакрытие модалки создания чата
         const newChatModal = $('new-chat-modal');
         if (newChatModal && !newChatModal.classList.contains('hidden')) {
             closeNewChat();
         }
 
-        // Активируем чат для connectedPeerId
         if (connectedPeerId) {
             console.log('Активируем чат для:', connectedPeerId);
             activePeer = connectedPeerId;
@@ -109,7 +106,6 @@ function setupDataChannel(peerId) {
             renderContactList();
         }
 
-        // Скрываем панель восстановления
         const restorePanel = $('restore-panel');
         if (restorePanel) restorePanel.classList.remove('visible');
     };
@@ -117,7 +113,6 @@ function setupDataChannel(peerId) {
     dataChannel.onclose = () => {
         console.log('Data channel закрыт');
         updateOnlineStatus();
-        // Показываем панель восстановления если это был активный чат
         if (activePeer && peerId === activePeer) {
             const restorePanel = $('restore-panel');
             if (restorePanel) restorePanel.classList.add('visible');
@@ -128,11 +123,10 @@ function setupDataChannel(peerId) {
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'key') {
-                // Сохраняем ключ собеседника для connectedPeerId или activePeer
                 const targetPeer = connectedPeerId || activePeer;
                 if (targetPeer && contacts[targetPeer]) {
                     contacts[targetPeer].remoteKey = data.key;
-                    saveContacts();
+                    await saveContactsSecure();
                     console.log('Получен ключ собеседника:', data.key);
                     if (keySendInterval) clearInterval(keySendInterval);
                     loadMessages(targetPeer);
@@ -141,8 +135,14 @@ function setupDataChannel(peerId) {
             } else if (data.type === 'message' || data.type === 'image') {
                 const targetPeer = connectedPeerId || activePeer;
                 if (targetPeer && contacts[targetPeer]) {
-                    saveMessageToHistory(targetPeer, data);
+                    await saveMessageToHistory(targetPeer, data);
                     if (targetPeer === activePeer) loadMessages(targetPeer);
+                }
+            } else if (data.type === 'fingerprint_ack') {
+                // Собеседник подтвердил наш отпечаток
+                if (connectedPeerId) {
+                    verifiedFingerprints[connectedPeerId] = true;
+                    console.log('Отпечаток подтверждён собеседником');
                 }
             }
         } catch (e) {
@@ -151,7 +151,7 @@ function setupDataChannel(peerId) {
     };
 }
 
-// Отправка сообщения (вызывается из ui.js)
+// Отправка сообщения
 async function sendMessage() {
     const text = $('message-input').value.trim();
     if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') {
@@ -167,7 +167,7 @@ async function sendMessage() {
         const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
         const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
         dataChannel.send(JSON.stringify(msgObj));
-        saveMessageToHistory(activePeer, msgObj);
+        await saveMessageToHistory(activePeer, msgObj);
         $('message-input').value = '';
         loadMessages(activePeer);
     } catch (e) {
@@ -189,7 +189,6 @@ async function sendImage(file) {
     }
 
     try {
-        // Сжатие через canvas
         const img = await createImageBitmap(file);
         const canvas = document.createElement('canvas');
         const maxDim = 800;
@@ -215,7 +214,7 @@ async function sendImage(file) {
             timestamp: Date.now()
         };
         dataChannel.send(JSON.stringify(msgObj));
-        saveMessageToHistory(activePeer, msgObj);
+        await saveMessageToHistory(activePeer, msgObj);
         loadMessages(activePeer);
     } catch (e) {
         console.error('Ошибка отправки изображения:', e);
@@ -223,11 +222,30 @@ async function sendImage(file) {
     }
 }
 
-function saveMessageToHistory(peerId, msg) {
+async function saveMessageToHistory(peerId, msg) {
     const key = `history_${[currentUser, peerId].sort().join('_')}`;
-    const hist = JSON.parse(localStorage.getItem(key) || '[]');
+    let hist = [];
+    if (masterPassword) {
+        hist = await CryptoSystem.loadEncryptedHistory(key, masterPassword);
+    } else {
+        hist = JSON.parse(localStorage.getItem(key) || '[]');
+    }
     hist.push(msg);
-    localStorage.setItem(key, JSON.stringify(hist));
+    
+    if (masterPassword) {
+        await CryptoSystem.saveEncryptedHistory(key, hist, masterPassword);
+    } else {
+        localStorage.setItem(key, JSON.stringify(hist));
+    }
+}
+
+async function loadMessageHistory(peerId) {
+    const key = `history_${[currentUser, peerId].sort().join('_')}`;
+    if (masterPassword) {
+        return await CryptoSystem.loadEncryptedHistory(key, masterPassword);
+    } else {
+        return JSON.parse(localStorage.getItem(key) || '[]');
+    }
 }
 
 function waitForIceGathering() {
@@ -242,41 +260,229 @@ function waitForIceGathering() {
     });
 }
 
-// Функции для потока создания чата
+// Функция верификации отпечатка
+async function verifyFingerprint(peerId, localFp, remoteFp) {
+    if (verifiedFingerprints[peerId]) return true;
+    
+    const localWords = sdpToWordsByFp(localFp);
+    const remoteWords = sdpToWordsByFp(remoteFp);
+    
+    if (localWords === remoteWords) {
+        verifiedFingerprints[peerId] = true;
+        return true;
+    }
+    
+    // Показываем диалог подтверждения
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'modal';
+        modal.innerHTML = `
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>🔐 Проверка отпечатка</h2>
+                </div>
+                <div class="modal-body">
+                    <p>Сравните коды с собеседником:</p>
+                    <div class="fingerprint-verify">
+                        <div class="fp-words">${localWords}</div>
+                        <p style="color: var(--text-secondary); margin: 8px 0;">Код должен совпадать у обоих</p>
+                    </div>
+                    <div class="fp-buttons">
+                        <button class="btn-primary" id="fp-confirm">✅ Совпадает</button>
+                        <button class="btn-secondary" id="fp-deny">❌ Не совпадает</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        
+        document.getElementById('fp-confirm').onclick = () => {
+            verifiedFingerprints[peerId] = true;
+            modal.remove();
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({ type: 'fingerprint_ack' }));
+            }
+            resolve(true);
+        };
+        
+        document.getElementById('fp-deny').onclick = () => {
+            modal.remove();
+            resolve(false);
+        };
+    });
+}
+
+function sdpToWordsByFp(fp) {
+    if (!fp) return 'Неизвестно';
+    let seed = 0;
+    for (let i = 0; i < fp.length; i++) {
+        seed = ((seed << 5) - seed) + fp.charCodeAt(i);
+        seed |= 0;
+    }
+    const words = [];
+    const absSeed = Math.abs(seed);
+    for (let i = 0; i < 3; i++) {
+        const index = (absSeed + i * 7) % WORD_LIST.length;
+        words.push(WORD_LIST[index]);
+    }
+    return words.join(' · ');
+}
+
+async function saveContactsSecure() {
+    if (masterPassword) {
+        await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+    } else {
+        localStorage.setItem('contacts', JSON.stringify(contacts));
+    }
+}
+
+// Функции потока создания чата
 async function setupPeerConnectionForHost() {
     const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
     peerConnection = new RTCPeerConnection(configuration);
+    
+    // Data channel создаётся здесь, но setupDataChannel вызывается ПОСЛЕ установки remoteDescription
     dataChannel = peerConnection.createDataChannel('chat', { ordered: true });
-    setupDataChannel(connectedPeerId);
+    
     peerConnection.oniceconnectionstatechange = updateOnlineStatus;
     peerConnection.onconnectionstatechange = () => {
         console.log('Host connection state:', peerConnection.connectionState);
         if (peerConnection.connectionState === 'connected') updateOnlineStatus();
     };
+    
+    // Не вызываем setupDataChannel здесь — вызовем после получения ответа
 }
 
-// Функция для восстановления чата
+async function hostSubmitAnswer() {
+    const hostAnswerInput = $('host-answer-input');
+    if (!hostAnswerInput) return;
+    const answerStr = hostAnswerInput.value.trim();
+    if (!answerStr) return;
+    
+    try {
+        const answer = JSON.parse(answerStr);
+        
+        // Верификация отпечатка перед установкой соединения
+        const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
+        const remoteFp = CryptoSystem.extractFingerprint(answer.sdp);
+        
+        const verified = await verifyFingerprint(connectedPeerId, localFp, remoteFp);
+        if (!verified) {
+            alert('Отпечатки не совпадают! Возможна атака "человек посередине".');
+            return;
+        }
+        
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        
+        // Теперь настраиваем data channel
+        setupDataChannel(connectedPeerId, 'host');
+        
+        const hostResponseArea = $('host-response-area');
+        const hostWaiting = $('host-waiting');
+        
+        if (hostResponseArea) hostResponseArea.classList.remove('visible');
+        if (hostWaiting) {
+            hostWaiting.classList.remove('hidden');
+            hostWaiting.style.display = 'block';
+        }
+        
+        console.log('Ответ установлен, ожидаем подключения...');
+    } catch (e) {
+        alert('Неверный код ответа');
+        console.error(e);
+    }
+}
+
+async function joinSubmitOffer() {
+    const joinOfferInput = $('join-offer-input');
+    if (!joinOfferInput) return;
+    const offerStr = joinOfferInput.value.trim();
+    if (!offerStr) return;
+    
+    try {
+        const offer = JSON.parse(offerStr);
+        connectedPeerId = CryptoSystem.generateKey().slice(0, 16);
+        pendingLocalKey = CryptoSystem.generateKey();
+        
+        if (!contacts[connectedPeerId]) {
+            contacts[connectedPeerId] = { name: connectedPeerId.slice(0, 8), avatar: '' };
+        }
+        contacts[connectedPeerId].localSessionKey = pendingLocalKey;
+        contacts[connectedPeerId].role = 'guest';
+        localStorage.setItem(`role_${connectedPeerId}`, 'guest');
+        await saveContactsSecure();
+
+        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+        peerConnection = new RTCPeerConnection(configuration);
+        
+        peerConnection.ondatachannel = (event) => {
+            console.log('Получен data channel от хоста');
+            dataChannel = event.channel;
+            setupDataChannel(connectedPeerId, 'guest');
+        };
+        
+        peerConnection.oniceconnectionstatechange = updateOnlineStatus;
+        peerConnection.onconnectionstatechange = () => {
+            console.log('Guest connection state:', peerConnection.connectionState);
+            if (peerConnection.connectionState === 'connected') updateOnlineStatus();
+        };
+        
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        await waitForIceGathering();
+
+        const finalAnswer = peerConnection.localDescription;
+        const joinAnswerDisplay = $('join-answer-display');
+        const joinAnswerWords = $('join-answer-words');
+        
+        if (joinAnswerDisplay) joinAnswerDisplay.value = JSON.stringify(finalAnswer);
+        if (joinAnswerWords) joinAnswerWords.textContent = sdpToWords(finalAnswer.sdp);
+        
+        copyToClipboard(JSON.stringify(finalAnswer));
+
+        const joinInputArea = $('join-input-area');
+        const joinResponseArea = $('join-response-area');
+        const joinWaiting = $('join-waiting');
+        
+        if (joinInputArea) joinInputArea.classList.remove('visible');
+        if (joinResponseArea) {
+            joinResponseArea.classList.remove('hidden');
+            setTimeout(() => joinResponseArea.classList.add('visible'), 100);
+        }
+        
+        const shareBtn = $('share-join-btn');
+        if (shareBtn && navigator.share) shareBtn.style.display = '';
+        
+        if (joinWaiting) {
+            joinWaiting.classList.remove('hidden');
+            joinWaiting.style.display = 'block';
+        }
+        
+        console.log('Ответ сгенерирован, отправьте его хосту');
+    } catch (e) {
+        alert('Не удалось обработать приглашение');
+        console.error(e);
+    }
+}
+
 async function restoreSession(peerId) {
     const role = contacts[peerId]?.role || localStorage.getItem(`role_${peerId}`);
     
     if (role === 'host') {
-        // Пересоздаём приглашение и показываем его
         showNewChat();
         await startHostFlow();
         
-        // Показываем панель с приглашением
         const hostInviteArea = $('host-invite-area');
         if (hostInviteArea) {
             hostInviteArea.classList.add('visible');
         }
         
-        // Обновляем сообщение
         const alertInfo = hostInviteArea?.querySelector('.alert');
         if (alertInfo) {
             alertInfo.textContent = 'Отправьте этот новый код другу для переподключения';
         }
     } else if (role === 'guest') {
-        // Показываем модалку для ввода нового приглашения
         showNewChat();
         startJoinFlow();
         
@@ -285,7 +491,6 @@ async function restoreSession(peerId) {
             joinInputArea.classList.add('visible');
         }
         
-        // Обновляем сообщение
         const alertInfo = joinInputArea?.querySelector('.alert');
         if (alertInfo) {
             alertInfo.textContent = 'Попросите друга отправить новый код и вставьте его сюда';

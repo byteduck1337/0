@@ -257,6 +257,109 @@ body {
     color: var(--text-secondary);
 }
 
+@media (min-width: 701px) and (max-width: 1024px) {
+    #app {
+        height: 100vh;
+        margin: 0;
+        border-radius: 0;
+        max-width: 100%;
+    }
+    
+    .sidebar {
+        max-width: 280px;
+    }
+    
+    .message {
+        max-width: 80%;
+    }
+}
+
+/* Модальное окно мастер-пароля */
+.master-password-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(4px);
+}
+
+.master-password-content {
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 32px;
+    max-width: 400px;
+    width: 90%;
+    text-align: center;
+    box-shadow: var(--shadow);
+}
+
+.master-password-content h2 {
+    margin-bottom: 8px;
+    color: var(--primary);
+}
+
+.master-password-content p {
+    color: var(--text-secondary);
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+}
+
+.master-password-content input {
+    width: 100%;
+    padding: 12px;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    font-size: 1rem;
+    margin-bottom: 12px;
+    background: var(--bg);
+    color: var(--text);
+    text-align: center;
+    letter-spacing: 2px;
+}
+
+.master-password-content input:focus {
+    outline: none;
+    border-color: var(--primary);
+}
+
+.master-password-content .btn-primary {
+    width: 100%;
+    padding: 12px;
+    font-size: 1rem;
+}
+
+.master-error {
+    color: #ef4444;
+    font-size: 0.85rem;
+    margin-top: 8px;
+}
+
+/* Индикатор верификации отпечатка */
+.fingerprint-verify {
+    padding: 16px;
+    background: var(--pinned-bg);
+    border-radius: var(--radius);
+    margin: 12px 0;
+    text-align: center;
+}
+
+.fingerprint-verify .fp-words {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: var(--primary);
+    letter-spacing: 2px;
+    margin: 12px 0;
+}
+
+.fingerprint-verify .fp-buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 12px;
+}
 /* ==================== Main Chat Area ==================== */
 .main {
     flex: 1;

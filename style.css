@@ -74,6 +74,9 @@ body {
 }
 
 /* ==================== Sidebar Toggle Button ==================== */
+.hidden {
+    display: none !important;
+}
 .sidebar-toggle {
     display: none;
     position: fixed;

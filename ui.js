@@ -730,3 +730,127 @@ function toggleSidebar() {
     if (sidebar) sidebar.classList.toggle('visible');
     if (mainChat) mainChat.classList.toggle('shifted');
 }
+
+
+
+////////////////////msgremove
+
+
+async function deleteAllChats() {
+    const count = Object.keys(contacts).length;
+    
+    if (count === 0) {
+        alert('Нет чатов для удаления.');
+        return;
+    }
+    
+    const confirmed = confirm(
+        `⚠️ Вы уверены, что хотите удалить ВСЕ чаты?\n\n` +
+        `Будет удалено чатов: ${count}\n` +
+        `Вся история сообщений и ключи будут безвозвратно потеряны.\n\n` +
+        `Это действие нельзя отменить!`
+    );
+    
+    if (!confirmed) return;
+    
+    // Двойное подтверждение
+    const doubleConfirmed = confirm(
+        `Точно уверены? Введите количество чатов (${count}) для подтверждения:`
+    );
+    
+    if (!doubleConfirmed) return;
+    
+    try {
+        // Закрываем текущее соединение
+        if (dataChannel) {
+            dataChannel.close();
+            dataChannel = null;
+        }
+        if (peerConnection) {
+            peerConnection.close();
+            peerConnection = null;
+        }
+        if (keySendInterval) {
+            clearInterval(keySendInterval);
+            keySendInterval = null;
+        }
+        
+        // Удаляем историю и закреплённые для каждого чата
+        for (const peerId of Object.keys(contacts)) {
+            const histKey = `history_${[currentUser, peerId].sort().join('_')}`;
+            const pinnedKey = `pinned_${peerId}`;
+            
+            if (masterPassword) {
+                localStorage.removeItem(`hist_${histKey}`);
+            } else {
+                localStorage.removeItem(histKey);
+            }
+            localStorage.removeItem(pinnedKey);
+            localStorage.removeItem(`role_${peerId}`);
+            localStorage.removeItem(pinnedKey + '_enc');
+        }
+        
+        // Очищаем контакты
+        contacts = {};
+        if (masterPassword) {
+            await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+        } else {
+            localStorage.setItem('contacts', JSON.stringify(contacts));
+        }
+        
+        // Сбрасываем активный чат
+        activePeer = null;
+        connectedPeerId = null;
+        verifiedFingerprints = {};
+        localStorage.removeItem('activePeer');
+        
+        // Обновляем UI
+        renderContactList();
+        
+        const mainChat = $('main-chat');
+        const sidebar = $('sidebar');
+        if (mainChat) mainChat.classList.add('hidden');
+        if (sidebar) {
+            sidebar.classList.remove('hidden');
+            if (window.innerWidth <= 700) {
+                sidebar.classList.add('visible');
+            }
+        }
+        
+        // Очищаем область сообщений
+        const messagesContainer = $('messages');
+        if (messagesContainer) {
+            messagesContainer.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-icon">💬</div>
+                    <p>Выберите чат или создайте новый</p>
+                </div>
+            `;
+        }
+        
+        // Скрываем панели
+        const restorePanel = $('restore-panel');
+        if (restorePanel) restorePanel.classList.remove('visible');
+        
+        const pinnedPanel = $('pinned-panel');
+        if (pinnedPanel) pinnedPanel.classList.remove('visible');
+        
+        // Обновляем отображение ключей
+        const myKeyEl = $('my-key-display');
+        const partnerKeyEl = $('partner-key-display');
+        if (myKeyEl) myKeyEl.innerText = 'none';
+        if (partnerKeyEl) partnerKeyEl.innerText = '(ожидание...)';
+        
+        // Обновляем статус
+        updateOnlineStatus();
+        
+        // Закрываем настройки
+        closeSettings();
+        
+        alert(`✅ Все чаты успешно удалены (${count} шт.)`);
+        
+    } catch (e) {
+        console.error('Ошибка при удалении чатов:', e);
+        alert('❌ Произошла ошибка при удалении чатов.');
+    }
+}

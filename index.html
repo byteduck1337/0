@@ -162,7 +162,7 @@
     </div>
   </div>
 
-  <!-- Модальное окно настроек -->
+<!-- Модальное окно настроек -->
   <div class="modal hidden" id="settings-modal">
     <div class="modal-content">
       <div class="modal-header">
@@ -182,7 +182,11 @@
           <label for="theme-toggle">Тёмная тема</label>
           <input type="checkbox" id="theme-toggle" onchange="toggleTheme()">
         </div>
+        <div class="divider"><span>Опасная зона</span></div>
         <div class="button-group">
+          <button onclick="deleteAllChats()" class="btn-secondary" style="color: #ef4444; border-color: #ef4444;">🗑 Удалить все чаты</button>
+        </div>
+        <div class="button-group" style="margin-top: 16px;">
           <button onclick="saveSettings()" class="btn-primary">Сохранить</button>
           <button onclick="closeSettings()" class="btn-secondary">Отмена</button>
         </div>

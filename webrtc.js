@@ -1,4 +1,6 @@
-// webrtc.js — PeerJS с fallback-серверами, retry и 2 ICE-серверами.
+// webrtc.js — Signaling через Cloudflare Worker + чистый WebRTC.
+// Трафик P2P, signaling только для handshake.
+
 const WORD_LIST = [
 'Альфа','Браво','Чарли','Дельта','Эхо','Фокстрот','Гольф','Отель',
 'Индия','Джульет','Кило','Лима','Майк','Ноябрь','Оскар','Папа',
@@ -8,376 +10,340 @@ const WORD_LIST = [
 'Нефритовый','Ониксовый','Янтарный','Коралловый','Лазурный','Фиолетовый','Малиновый','Индиго',
 'Бирюзовый','Магентовый','Оливковый','Бордовый'
 ];
-const ROOM_PREFIX = '0byte-v1-';
-
-// ★ РОВНО 2 ICE-сервера (убрали warning PeerJS)
-const ICE_CONFIG = { iceServers: [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
-]};
-
-// ★ Список signaling-серверов PeerJS (пробуем по очереди)
-const PEERJS_SERVERS = [
-  { host: '0.peerjs.com',  port: 443, path: '/', secure: true },
-  { host: '1.peerjs.com',  port: 443, path: '/', secure: true },
-  { host: 'peerjs-server.herokuapp.com', port: 443, path: '/', secure: true },
-  { host: 'peerjs.discoverydns.com', port: 443, path: '/', secure: true },
-];
-let currentServerIdx = 0;
 
 // ── Глобальное состояние ──
 let currentUser, myName = 'Вы', myAvatar = '';
 let contacts = {};
 let activePeer = null;
+let peerConnection = null;
 let dataChannel = null;
-const channels = {};
-const hostPeers = {};
-const keyIntervals = {};
-let pendingHostPeer = null;
+let pendingLocalKey = null;
+let keySendInterval = null;
 let connectedPeerId = null;
 let masterPassword = null;
 let verifiedFingerprints = {};
-let myPeer = null;
+let pendingRemoteFp = null;
+let pollingAbort = null;
+
+// ── Signaling URL (из настроек или дефолт) ──
+function signalingUrl() {
+  return localStorage.getItem('signalingUrl') || 'https://0byte-signaling.YOUR-NAME.workers.dev';
+}
 
 // ── Код-комнаты ──
 const randInt = n => Math.floor(Math.random() * n);
 function generateRoomCode() {
-  return { i1: randInt(WORD_LIST.length), i2: randInt(WORD_LIST.length), num: 10 + randInt(90) };
+  return {
+    w1: WORD_LIST[randInt(WORD_LIST.length)],
+    w2: WORD_LIST[randInt(WORD_LIST.length)],
+    num: 10 + randInt(90)
+  };
 }
-const roomCodeWords = c => `${WORD_LIST[c.i1]} ${WORD_LIST[c.i2]} ${c.num}`;
-const roomIdFromCode = c => ROOM_PREFIX + c.i1 + '-' + c.i2 + '-' + c.num;
+const roomCodeString = c => `${c.w1} ${c.w2} ${c.num}`;
 function parseRoomCode(text) {
   const s = String(text || '').toLowerCase();
   const numMatch = s.match(/\d+/);
   if (!numMatch) return null;
   const num = parseInt(numMatch[0], 10);
   const lower = WORD_LIST.map(w => w.toLowerCase());
-  const found = [];
-  const re = /[a-zа-яё]+/g; let m;
-  while ((m = re.exec(s))) {
-    const wi = lower.indexOf(m[0]);
-    if (wi >= 0) found.push({ wi, idx: m.index });
-  }
-  found.sort((a, b) => a.idx - b.idx);
+  const words = [...s.matchAll(/[a-zа-яё]+/gi)].map(m => m[0].toLowerCase());
+  const found = words.map(w => lower.indexOf(w)).filter(i => i >= 0).slice(0, 2);
   if (found.length < 2) return null;
-  return { i1: found[0].wi, i2: found[1].wi, num };
+  return { w1: WORD_LIST[found[0]], w2: WORD_LIST[found[1]], num };
 }
 
-// ── Адаптер PeerJS-conn → dataChannel ──
-function wrapConn(conn, peerId) {
-  const a = {
-    peerId, conn, _open: null, _msg: null, _close: null,
-    get readyState() { return conn.open ? 'open' : 'connecting'; },
-    send: s => conn.send(s),
-    close: () => { try { conn.close(); } catch (e) {} },
-    set onopen(fn) { a._open = fn; if (conn.open) setTimeout(() => fn && fn(), 0); },
-    get onopen() { return a._open; },
-    set onmessage(fn) { a._msg = fn; },
-    get onmessage() { return a._msg; },
-    set onclose(fn) { a._close = fn; },
-    get onclose() { return a._close; }
-  };
-  conn.on('data',  d => a._msg  && a._msg({ data: typeof d === 'string' ? d : JSON.stringify(d) }));
-  conn.on('open',  () => a._open && a._open());
-  conn.on('close', () => a._close && a._close());
-  conn.on('error', e => console.warn('conn error:', e));
-  return a;
+// ── ICE конфиг (STUN + бесплатный TURN OpenRelay) ──
+const ICE_CONFIG = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+  ]
+};
+
+// ── HTTP к signaling worker ──
+async function signalingRequest(path, opts = {}) {
+  const url = signalingUrl() + path;
+  const res = await fetch(url, {
+    method: opts.method || 'GET',
+    headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: opts.body ? JSON.stringify(opts.body) : undefined
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || 'Signaling error');
+  }
+  return res.json();
 }
 
-// ── ★ Создание Peer с retry по серверам ──
-function createPeerWithRetry(id = null, attempt = 0) {
-  return new Promise((resolve, reject) => {
-    if (attempt >= PEERJS_SERVERS.length) {
-      return reject(new Error(
-        'Не удалось подключиться ни к одному signaling-серверу PeerJS.\n\n' +
-        'Возможные причины:\n' +
-        '• Включён adblocker (uBlock Origin / Privacy Badger) — отключите для этого сайта\n' +
-        '• Корпоративный firewall блокирует WSS-порт 443\n' +
-        '• Публичные сервера PeerJS сейчас недоступны — попробуйте через 1-2 минуты'
-      ));
+// ── Проверка доступности Worker ──
+async function checkSignaling() {
+  try {
+    const r = await signalingRequest('/api/ping');
+    setStatusOk(r.rooms ?? 0);
+    return true;
+  } catch (e) {
+    setStatusError(e.message);
+    return false;
+  }
+}
+function setStatusOk(roomsCount = '') {
+  const el = getEl('signaling-status');
+  const host = new URL(signalingUrl()).host;
+  if (el) el.innerHTML = `<span style="color:var(--success,#22c55e)">●</span> Signaling: ${host}` + (roomsCount ? ` (${roomsCount} комн.)` : '');
+}
+function setStatusError(msg) {
+  const el = getEl('signaling-status');
+  if (el) el.innerHTML = `<span style="color:#ef4444">●</span> Signaling: ошибка${msg ? ' — ' + msg : ''}`;
+}
+
+// ── Polling answer (для хоста) ──
+function startAnswerPolling(code, onAnswer) {
+  if (pollingAbort) pollingAbort.abort = true;
+  pollingAbort = { abort: false };
+  const ctrl = pollingAbort;
+  const poll = async () => {
+    while (!ctrl.abort) {
+      try {
+        const r = await signalingRequest('/api/answer?code=' + encodeURIComponent(JSON.stringify(code)));
+        if (r.answer) { onAnswer(r.answer); return; }
+      } catch (e) { console.warn('polling error:', e); }
+      await new Promise(r => setTimeout(r, 1500));
     }
-    const server = PEERJS_SERVERS[(currentServerIdx + attempt) % PEERJS_SERVERS.length];
-    console.log(`[PeerJS] Попытка ${attempt + 1}/${PEERJS_SERVERS.length}: ${server.host}`);
+  };
+  poll();
+}
+function stopPolling() { if (pollingAbort) pollingAbort.abort = true; }
 
-    const opts = {
-      host: server.host,
-      port: server.port,
-      path: server.path,
-      secure: server.secure,
-      config: ICE_CONFIG,
-      debug: 1,
-      // короткий timeout на коннект к signaling
-      pingInterval: 10000
-    };
-    const p = new Peer(id, opts);
-
-    let settled = false;
-    const timeout = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      console.warn(`[PeerJS] Таймаут на ${server.host}, пробуем следующий`);
-      try { p.destroy(); } catch (e) {}
-      resolve(createPeerWithRetry(id, attempt + 1));
-    }, 8000);
-
-    p.on('open', () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      currentServerIdx = (currentServerIdx + attempt) % PEERJS_SERVERS.length;
-      console.log(`[PeerJS] ✓ Подключено к ${server.host} (id=${p.id})`);
-      setStatusOk(server.host);
-      resolve(p);
-    });
-    p.on('error', err => {
-      if (settled && err.type !== 'peer-unavailable' && err.type !== 'network') return;
-      // peer-unavailable — это нормально при подключении гостя, не считаем ошибкой сервера
-      if (err.type === 'peer-unavailable') {
-        const errEl = getEl('join-error');
-        if (errEl) errEl.textContent = 'Комната не найдена. Проверьте код или попросите друга создать её заново.';
-        setStatusOk(server.host);
-        return;
-      }
-      console.warn(`[PeerJS] Ошибка на ${server.host}:`, err.type, err.message);
-      if (!settled) {
-        settled = true;
-        clearTimeout(timeout);
-        try { p.destroy(); } catch (e) {}
-        resolve(createPeerWithRetry(id, attempt + 1));
-      } else {
-        // потеряли связь уже после коннекта
-        setStatusError();
-      }
-    });
-    p.on('disconnected', () => {
-      try { p.reconnect(); } catch (e) {}
-    });
-    p.on('close', () => setStatusError());
+// ── Ожидание завершения ICE gathering ──
+function waitForIceGathering(pc) {
+  return new Promise(resolve => {
+    if (pc.iceGatheringState === 'complete') return resolve();
+    const done = () => { pc.removeEventListener('icegatheringstatechange', done); resolve(); };
+    pc.addEventListener('icegatheringstatechange', done);
+    setTimeout(resolve, 4000);
   });
 }
 
-function setStatusOk(serverHost) {
-  const el = getEl('signaling-status');
-  if (el) el.innerHTML = `<span style="color:var(--success,#22c55e)">●</span> Signaling: ${serverHost}`;
-}
-function setStatusError() {
-  const el = getEl('signaling-status');
-  if (el) el.innerHTML = `<span style="color:#ef4444">●</span> Signaling: отключен (пробуем переподключиться...)`;
-}
+// ── ХОСТ: создать комнату ──
+async function hostCreateRoom(onCode) {
+  if (!await checkSignaling()) throw 'Signaling-сервер недоступен. Проверьте URL в настройках.';
+  const code = generateRoomCode();
+  pendingLocalKey = CryptoSystem.generateKey();
 
-// ── Стабильный id нашего Peer ──
-async function ensureMyPeer() {
-  if (myPeer && !myPeer.destroyed) return myPeer;
-  let id = localStorage.getItem('myPeerId');
-  if (!id) { id = '0byte-u-' + CryptoSystem.generateKey().slice(0, 12); localStorage.setItem('myPeerId', id); }
-  myPeer = await createPeerWithRetry(id);
-  return myPeer;
-}
+  // Создаём PeerConnection и offer
+  if (peerConnection) { try { peerConnection.close(); } catch(e){} }
+  peerConnection = new RTCPeerConnection(ICE_CONFIG);
+  dataChannel = peerConnection.createDataChannel('chat', { ordered: true });
+  setupDataChannelEvents();
 
-// ── Хост: создать комнату ──
-async function hostCreateRoom(code, onConn) {
-  const p = await createPeerWithRetry(roomIdFromCode(code));
-  p.on('connection', conn => onConn(conn));
-  return p;
-}
-async function hostStart(onCode) {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const code = generateRoomCode();
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+  await waitForIceGathering(peerConnection);
+  const finalOffer = peerConnection.localDescription;
+
+  // Верификация отпечатка (сохраняем local fp)
+  pendingRemoteFp = CryptoSystem.extractFingerprint(finalOffer.sdp);
+
+  // Отправляем offer в Worker
+  await signalingRequest('/api/room', { method: 'POST', body: { code, offer: finalOffer } });
+
+  onCode(roomCodeString(code));
+
+  // Ожидаем answer через polling
+  startAnswerPolling(code, async (answer) => {
     try {
-      const p = await hostCreateRoom(code, conn => onHostConnection(conn, code));
-      pendingHostPeer = p;
-      onCode(roomCodeWords(code));
-      return;
-    } catch (e) {
-      if (attempt === 4) throw e;
-    }
-  }
-}
-function onHostConnection(conn, code) {
-  const pid = conn.peer;
-  if (!contacts[pid]) contacts[pid] = { name: pid.slice(0, 8), avatar: '' };
-  contacts[pid].role = 'host';
-  contacts[pid].room = code;
-  contacts[pid].remotePeerId = pid;
-  saveContactsSecure();
-  if (pendingHostPeer) { hostPeers[pid] = pendingHostPeer; pendingHostPeer = null; }
-  const adapter = wrapConn(conn, pid);
-  channels[pid] = adapter;
-  connectedPeerId = pid;
-  setupDataChannel(pid, 'host');
+      // Верификация отпечатка гостя
+      const remoteFp = CryptoSystem.extractFingerprint(answer.sdp);
+      const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
+      const ok = await verifyFingerprint('host-peer', localFp, remoteFp);
+      if (!ok) { alert('Отпечатки не совпадают! Возможна MITM-атака.'); return; }
+
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+
+      // Сохраняем контакт (id = room code)
+      const peerId = roomCodeString(code);
+      connectedPeerId = peerId;
+      if (!contacts[peerId]) contacts[peerId] = { name: peerId, avatar: '', role: 'host', room: code };
+      contacts[peerId].localSessionKey = pendingLocalKey;
+      contacts[peerId].room = code;
+      await saveContactsSecure();
+
+      // Открываем чат
+      activePeer = peerId;
+      localStorage.setItem('activePeer', peerId);
+      updateUIForPeer(peerId);
+      renderContactList();
+      const m = getEl('new-chat-modal'); if (m) m.classList.add('hidden');
+    } catch (e) { console.error(e); alert('Ошибка соединения: ' + e.message); }
+  });
 }
 
-// ── Гость: подключиться по коду ──
+// ── ГОСТЬ: подключиться по коду ──
 async function guestJoin(codeText) {
+  if (!await checkSignaling()) throw 'Signaling-сервер недоступен.';
   const code = parseRoomCode(codeText);
   if (!code) throw 'Не распознал код. Пример: «Янтарный Тигр 42»';
-  const roomId = roomIdFromCode(code);
-  await ensureMyPeer();
-  const conn = myPeer.connect(roomId, { reliable: true });
-  const pid = roomId;
-  if (!contacts[pid]) contacts[pid] = { name: 'Комната ' + code.num, avatar: '' };
-  contacts[pid].role = 'guest';
-  contacts[pid].room = code;
+
+  // Получаем offer
+  const { offer } = await signalingRequest('/api/room?code=' + encodeURIComponent(JSON.stringify(code)));
+  if (!offer) throw 'Комната не найдена или истекла.';
+
+  pendingLocalKey = CryptoSystem.generateKey();
+  if (peerConnection) { try { peerConnection.close(); } catch(e){} }
+  peerConnection = new RTCPeerConnection(ICE_CONFIG);
+
+  peerConnection.ondatachannel = (e) => {
+    dataChannel = e.channel;
+    setupDataChannelEvents();
+  };
+  peerConnection.oniceconnectionstatechange = updateOnlineStatus;
+  peerConnection.onconnectionstatechange = () => updateOnlineStatus();
+
+  const remoteFp = CryptoSystem.extractFingerprint(offer.sdp);
+  await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+  const answer = await peerConnection.createAnswer();
+  await peerConnection.setLocalDescription(answer);
+  await waitForIceGathering(peerConnection);
+  const finalAnswer = peerConnection.localDescription;
+
+  // Верификация отпечатка
+  const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
+  const ok = await verifyFingerprint('guest-peer', localFp, remoteFp);
+  if (!ok) { alert('Отпечатки не совпадают! Возможна MITM-атака.'); throw 'Отменено'; }
+
+  // Отправляем answer
+  await signalingRequest('/api/answer', { method: 'POST', body: { code, answer: finalAnswer } });
+
+  const peerId = roomCodeString(code);
+  connectedPeerId = peerId;
+  if (!contacts[peerId]) contacts[peerId] = { name: peerId, avatar: '', role: 'guest', room: code };
+  contacts[peerId].localSessionKey = pendingLocalKey;
+  contacts[peerId].room = code;
   await saveContactsSecure();
-  const adapter = wrapConn(conn, pid);
-  channels[pid] = adapter;
-  connectedPeerId = pid;
-  setupDataChannel(pid, 'guest');
-  return code;
+
+  activePeer = peerId;
+  localStorage.setItem('activePeer', peerId);
+  updateUIForPeer(peerId);
+  renderContactList();
+  const m = getEl('new-chat-modal'); if (m) m.classList.add('hidden');
 }
 
 // ── Переподключение сохранённого чата ──
 async function reconnect(peerId) {
   const c = contacts[peerId];
   if (!c || !c.room) return false;
-  if (channels[peerId] && channels[peerId].readyState === 'open') return true;
+  if (dataChannel && dataChannel.readyState === 'open') return true;
+
+  // Для простоты — генерируем новую комнату при каждом переподключении
+  // (в production можно сохранять и переиспользовать код)
   if (c.role === 'host') {
-    if (hostPeers[peerId] && !hostPeers[peerId].destroyed) return false;
-    try {
-      const p = await hostCreateRoom(c.room, conn => onHostConnection(conn, c.room));
-      hostPeers[peerId] = p;
-      return true;
-    } catch (e) { return false; }
+    await hostCreateRoom(codeStr => {
+      console.log('Реподключение: новый код', codeStr);
+      const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
+    });
   } else {
-    await ensureMyPeer();
-    const conn = myPeer.connect(roomIdFromCode(c.room), { reliable: true });
-    channels[peerId] = wrapConn(conn, peerId);
-    setupDataChannel(peerId, 'guest');
-    return true;
+    // Гостю нужно, чтобы хост снова создал комнату
+    const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
   }
+  return true;
 }
+
 function openChat(peerId) {
-  if (!contacts[peerId]) { contacts[peerId] = { name: peerId.slice(0, 8), avatar: '' }; saveContactsSecure(); renderContactList(); }
+  if (!contacts[peerId]) { contacts[peerId] = { name: peerId.slice(0,8), avatar: '' }; saveContactsSecure(); renderContactList(); }
   activePeer = peerId;
   localStorage.setItem('activePeer', peerId);
-  dataChannel = channels[peerId] || null;
   updateUIForPeer(peerId);
   if (dataChannel && dataChannel.readyState === 'open') return;
   reconnect(peerId);
-  setTimeout(() => {
-    if (!(channels[peerId] && channels[peerId].readyState === 'open')) {
-      const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
-    }
-  }, 8000);
 }
 function restoreChat() {
-  const peerId = activePeer || connectedPeerId;
-  if (!peerId) return;
-  if (channels[peerId]) { channels[peerId].close(); delete channels[peerId]; }
-  dataChannel = null;
-  openChat(peerId);
-}
-function dropPeer(peerId) {
-  if (channels[peerId]) { channels[peerId].close(); delete channels[peerId]; }
-  if (hostPeers[peerId]) { try { hostPeers[peerId].destroy(); } catch (e) {} delete hostPeers[peerId]; }
-  if (keyIntervals[peerId]) { clearInterval(keyIntervals[peerId]); delete keyIntervals[peerId]; }
-  if (activePeer === peerId) dataChannel = null;
+  if (!activePeer) return;
+  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
+  if (peerConnection) { try { peerConnection.close(); } catch(e){} peerConnection = null; }
+  reconnect(activePeer);
 }
 
-// ── Канал: ключи, hello, сообщения ──
-function setupDataChannel(peerId, role = 'unknown') {
-  const ch = channels[peerId];
-  if (!ch) return;
-  if (!contacts[peerId]) contacts[peerId] = { name: peerId.slice(0, 8), avatar: '' };
-  if (!contacts[peerId].localSessionKey) { contacts[peerId].localSessionKey = CryptoSystem.generateKey(); saveContactsSecure(); }
-
-  ch.onopen = async () => {
-    console.log('Канал открыт:', peerId);
-    const sendKey = () => { if (ch.readyState === 'open') ch.send(JSON.stringify({ type: 'key', key: contacts[peerId].localSessionKey })); };
-    sendKey();
-    if (keyIntervals[peerId]) clearInterval(keyIntervals[peerId]);
-    keyIntervals[peerId] = setInterval(() => { if (ch.readyState === 'open') sendKey(); else clearInterval(keyIntervals[peerId]); }, 400);
-    ch.send(JSON.stringify({ type: 'hello', name: myName, avatar: myAvatar }));
-    updateOnlineStatus();
-    try {
-      const pc = ch.conn && ch.conn.peerConnection;
-      if (pc && pc.localDescription && pc.remoteDescription) {
-        const localFp = CryptoSystem.extractFingerprint(pc.localDescription.sdp);
-        const remoteFp = CryptoSystem.extractFingerprint(pc.remoteDescription.sdp);
-        if (localFp && remoteFp) verifyFingerprint(peerId, localFp, remoteFp);
-      }
-    } catch (e) { console.warn(e); }
-    const modal = getEl('new-chat-modal');
-    if (modal && !modal.classList.contains('hidden')) closeNewChat();
-    if (activePeer === peerId || !activePeer) {
-      activePeer = peerId;
-      dataChannel = ch;
-      localStorage.setItem('activePeer', peerId);
-      updateUIForPeer(peerId);
+// ── Data channel события ──
+function setupDataChannelEvents() {
+  if (!dataChannel) return;
+  dataChannel.onopen = async () => {
+    console.log('Канал открыт');
+    if (pendingLocalKey) {
+      const sendKey = () => { if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey })); };
+      sendKey();
+      if (keySendInterval) clearInterval(keySendInterval);
+      keySendInterval = setInterval(sendKey, 400);
     }
-    renderContactList();
+    dataChannel.send(JSON.stringify({ type: 'hello', name: myName, avatar: myAvatar }));
+    updateOnlineStatus();
     const rp = getEl('restore-panel'); if (rp) rp.classList.remove('visible');
   };
-  ch.onclose = () => {
-    console.log('Канал закрыт:', peerId);
+  dataChannel.onclose = () => {
+    console.log('Канал закрыт');
     updateOnlineStatus();
-    if (activePeer === peerId) {
+    if (activePeer) {
       const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
     }
   };
-  ch.onmessage = async (event) => {
+  dataChannel.onerror = (e) => console.error('DC error:', e);
+  dataChannel.onmessage = async (event) => {
     try {
       const data = JSON.parse(event.data);
+      const pid = activePeer || connectedPeerId;
+      if (!pid || !contacts[pid]) return;
       if (data.type === 'key') {
-        if (contacts[peerId]) {
-          contacts[peerId].remoteKey = data.key;
-          await saveContactsSecure();
-          if (keyIntervals[peerId]) clearInterval(keyIntervals[peerId]);
-          loadMessages(peerId);
-          updateKeyDisplay();
-        }
+        contacts[pid].remoteKey = data.key;
+        await saveContactsSecure();
+        if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
+        loadMessages(pid);
+        updateKeyDisplay();
       } else if (data.type === 'hello') {
-        if (contacts[peerId]) {
-          contacts[peerId].name = data.name || contacts[peerId].name;
-          contacts[peerId].avatar = data.avatar || contacts[peerId].avatar;
-          await saveContactsSecure();
-          renderContactList();
-          if (activePeer === peerId) updateUIForPeer(peerId);
-        }
+        contacts[pid].name = data.name || contacts[pid].name;
+        contacts[pid].avatar = data.avatar || contacts[pid].avatar;
+        await saveContactsSecure();
+        renderContactList();
+        if (activePeer === pid) updateUIForPeer(pid);
       } else if (data.type === 'message' || data.type === 'image') {
-        await saveMessageToHistory(peerId, data);
-        if (peerId === activePeer) loadMessages(peerId);
-      } else if (data.type === 'fingerprint_ack') {
-        verifiedFingerprints[peerId] = true;
+        await saveMessageToHistory(pid, data);
+        if (pid === activePeer) loadMessages(pid);
       }
-    } catch (e) { console.error('Ошибка обработки сообщения:', e); }
+    } catch (e) { console.error('msg error:', e); }
   };
 }
 
 // ── Отправка ──
 async function sendMessage() {
-  const text = getEl('message-input').value.trim();
+  const text = getEl('message-input')?.value.trim();
   if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') { alert('Нет соединения.'); return; }
-  const remoteKey = contacts[activePeer]?.remoteKey;
-  if (!remoteKey) { alert('Ожидание ключа шифрования...'); return; }
-  try {
-    const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
-    const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
-    dataChannel.send(JSON.stringify(msgObj));
-    await saveMessageToHistory(activePeer, msgObj);
-    getEl('message-input').value = '';
-    loadMessages(activePeer);
-  } catch (e) { console.error(e); alert('Не удалось зашифровать сообщение.'); }
+  const rk = contacts[activePeer]?.remoteKey;
+  if (!rk) { alert('Ожидание ключа...'); return; }
+  const ciphertext = await CryptoSystem.encrypt(text, rk);
+  const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
+  dataChannel.send(JSON.stringify(msgObj));
+  await saveMessageToHistory(activePeer, msgObj);
+  getEl('message-input').value = '';
+  loadMessages(activePeer);
 }
 async function sendImage(file) {
   if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') { alert('Нет соединения.'); return; }
-  const remoteKey = contacts[activePeer]?.remoteKey;
-  if (!remoteKey) { alert('Ожидание ключа шифрования...'); return; }
+  const rk = contacts[activePeer]?.remoteKey;
+  if (!rk) { alert('Ожидание ключа...'); return; }
   try {
     const img = await createImageBitmap(file);
     const canvas = document.createElement('canvas');
     const maxDim = 800;
     let { width, height } = img;
-    if (width > maxDim || height > maxDim) { const r = Math.min(maxDim / width, maxDim / height); width *= r; height *= r; }
+    if (width > maxDim || height > maxDim) { const r = Math.min(maxDim/width, maxDim/height); width*=r; height*=r; }
     canvas.width = width; canvas.height = height;
     canvas.getContext('2d').drawImage(img, 0, 0, width, height);
     const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.7));
-    const encrypted = await CryptoSystem.encryptData(await blob.arrayBuffer(), remoteKey);
+    const encrypted = await CryptoSystem.encryptData(await blob.arrayBuffer(), rk);
     const msgObj = { type: 'image', from: currentUser, ciphertext: encrypted, mimeType: 'image/jpeg', timestamp: Date.now() };
     dataChannel.send(JSON.stringify(msgObj));
     await saveMessageToHistory(activePeer, msgObj);
     loadMessages(activePeer);
-  } catch (e) { console.error(e); alert('Не удалось отправить изображение.'); }
+  } catch (e) { console.error(e); alert('Ошибка отправки изображения.'); }
 }
 
 // ── История ──
@@ -410,27 +376,72 @@ async function verifyFingerprint(peerId, localFp, remoteFp) {
     const modal = document.createElement('div');
     modal.className = 'modal';
     modal.innerHTML = `<div class="modal-content"><div class="modal-header"><h2>🔐 Проверка отпечатка</h2></div>
-      <div class="modal-body"><p>Сравните код с собеседником (устно):</p>
-      <div class="fingerprint-verify"><div class="fp-words">${localWords}</div><p style="color:var(--text-secondary)">Код должен совпадать у обоих</p></div>
-      <div class="fp-buttons"><button class="btn-primary" id="fp-confirm">✅ Совпадает</button><button class="btn-secondary" id="fp-deny">❌ Не совпадает</button></div></div></div>`;
+      <div class="modal-body"><p>Сравните код с собеседником устно:</p>
+      <div class="fingerprint-verify"><div class="fp-words">${localWords}</div>
+      <p style="color:var(--text-secondary)">Код должен совпадать у обоих</p></div>
+      <div class="fp-buttons">
+        <button class="btn-primary" id="fp-confirm">✅ Совпадает</button>
+        <button class="btn-secondary" id="fp-deny">❌ Не совпадает</button></div></div></div>`;
     document.body.appendChild(modal);
     document.getElementById('fp-confirm').onclick = () => {
       verifiedFingerprints[peerId] = true; modal.remove();
-      if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(JSON.stringify({ type: 'fingerprint_ack' }));
+      try { if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(JSON.stringify({ type: 'fingerprint_ack' })); } catch(e){}
       resolve(true);
     };
     document.getElementById('fp-deny').onclick = () => { modal.remove(); resolve(false); };
   });
 }
+
+// ── Вспомогательное ──
 async function saveContactsSecure() {
   if (masterPassword) await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
   else localStorage.setItem('contacts', JSON.stringify(contacts));
 }
 function updateOnlineStatus() {
-  const ch = activePeer ? channels[activePeer] : null;
-  const online = ch && ch.readyState === 'open';
+  const online = dataChannel && dataChannel.readyState === 'open';
   const el = getEl('online-status'); if (el) el.innerText = online ? '🟢 Онлайн' : '⚪ Отключен';
   const cs = getEl('chat-status'); if (cs && activePeer) cs.textContent = online ? 'онлайн' : 'офлайн';
-  const rp = getEl('restore-panel');
-  if (rp && activePeer && online) rp.classList.remove('visible');
+  if (online) { const rp = getEl('restore-panel'); if (rp) rp.classList.remove('visible'); }
+}
+
+// ── Публичные функции для UI ──
+async function startHostFlow() {
+  showSection('host-flow');
+  const codeEl = getEl('host-room-code');
+  const wait = getEl('host-waiting');
+  if (codeEl) codeEl.textContent = 'Создание комнаты...';
+  if (wait) wait.classList.add('hidden');
+  try {
+    await hostCreateRoom(words => {
+      if (codeEl) codeEl.textContent = words;
+      copyToClipboard(words);
+      if (wait) wait.classList.remove('hidden');
+    });
+  } catch (e) {
+    alert(e.message || 'Ошибка создания комнаты');
+    resetToRoleSelect();
+  }
+}
+function startJoinFlow() {
+  showSection('join-flow');
+  const i = getEl('join-code-input'); if (i) { i.value = ''; setTimeout(() => i.focus(), 100); }
+  const e = getEl('join-error'); if (e) e.textContent = '';
+}
+async function joinByCode() {
+  const input = getEl('join-code-input');
+  const err = getEl('join-error');
+  const btn = getEl('join-connect-btn');
+  const wait = getEl('join-waiting');
+  if (err) err.textContent = '';
+  if (btn) btn.disabled = true;
+  if (wait) wait.classList.remove('hidden');
+  try { await guestJoin(input.value.trim()); }
+  catch (msg) { if (err) err.textContent = msg; if (wait) wait.classList.add('hidden'); if (btn) btn.disabled = false; }
+}
+function copyHostCode() { const el = getEl('host-room-code'); if (el) copyToClipboard(el.textContent); }
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).catch(() => {
+    const ta = document.createElement('textarea'); ta.value = text;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  });
 }

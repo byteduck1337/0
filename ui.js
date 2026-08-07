@@ -217,6 +217,9 @@ async function saveSettings() {
   myName = getEl('name-input')?.value.trim() || 'Вы';
   myAvatar = getEl('avatar-input')?.value.trim() || '';
   localStorage.setItem('myName', myName); localStorage.setItem('myAvatar', myAvatar);
+  const sigInput = getEl('signaling-url-input');
+if (sigInput && sigInput.value.trim()) localStorage.setItem('signalingUrl', sigInput.value.trim());
+else localStorage.removeItem('signalingUrl');
   closeSettings(); renderContactList();
 }
 function toggleTheme() {

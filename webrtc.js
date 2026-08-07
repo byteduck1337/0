@@ -1,6 +1,4 @@
-﻿// webrtc.js — PeerJS Public Cloud: код-комната вместо длинных SDP.
-// Трафик после handshake идёт напрямую P2P; E2E — AES-GCM с обменом ключами поверх канала.
-
+// webrtc.js — PeerJS с fallback-серверами, retry и 2 ICE-серверами.
 const WORD_LIST = [
 'Альфа','Браво','Чарли','Дельта','Эхо','Фокстрот','Гольф','Отель',
 'Индия','Джульет','Кило','Лима','Майк','Ноябрь','Оскар','Папа',
@@ -11,25 +9,35 @@ const WORD_LIST = [
 'Бирюзовый','Магентовый','Оливковый','Бордовый'
 ];
 const ROOM_PREFIX = '0byte-v1-';
+
+// ★ РОВНО 2 ICE-сервера (убрали warning PeerJS)
 const ICE_CONFIG = { iceServers: [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
 ]};
+
+// ★ Список signaling-серверов PeerJS (пробуем по очереди)
+const PEERJS_SERVERS = [
+  { host: '0.peerjs.com',  port: 443, path: '/', secure: true },
+  { host: '1.peerjs.com',  port: 443, path: '/', secure: true },
+  { host: 'peerjs-server.herokuapp.com', port: 443, path: '/', secure: true },
+  { host: 'peerjs.discoverydns.com', port: 443, path: '/', secure: true },
+];
+let currentServerIdx = 0;
 
 // ── Глобальное состояние ──
 let currentUser, myName = 'Вы', myAvatar = '';
 let contacts = {};
 let activePeer = null;
-let dataChannel = null;             // активный канал (alias channels[activePeer])
-const channels = {};                // peerId -> wrapped conn
-const hostPeers = {};               // peerId -> Peer (наши комнаты)
+let dataChannel = null;
+const channels = {};
+const hostPeers = {};
 const keyIntervals = {};
-let pendingHostPeer = null;         // комната до первого подключения
+let pendingHostPeer = null;
 let connectedPeerId = null;
 let masterPassword = null;
 let verifiedFingerprints = {};
-let myPeer = null;                  // наш PeerJS-клиент (стабильный id)
+let myPeer = null;
 
 // ── Код-комнаты ──
 const randInt = n => Math.floor(Math.random() * n);
@@ -55,7 +63,7 @@ function parseRoomCode(text) {
   return { i1: found[0].wi, i2: found[1].wi, num };
 }
 
-// ── Адаптер PeerJS-conn → интерфейс dataChannel ──
+// ── Адаптер PeerJS-conn → dataChannel ──
 function wrapConn(conn, peerId) {
   const a = {
     peerId, conn, _open: null, _msg: null, _close: null,
@@ -76,39 +84,101 @@ function wrapConn(conn, peerId) {
   return a;
 }
 
-// ── Наш PeerJS-клиент (стабильный id для переподключений) ──
-function ensureMyPeer() {
-  return new Promise(resolve => {
-    if (myPeer && !myPeer.destroyed) return resolve(myPeer);
-    let id = localStorage.getItem('myPeerId');
-    if (!id) { id = '0byte-u-' + CryptoSystem.generateKey().slice(0, 12); localStorage.setItem('myPeerId', id); }
-    myPeer = new Peer(id, { config: ICE_CONFIG, debug: 1 });
-    myPeer.on('open', () => resolve(myPeer));
-    myPeer.on('error', err => {
-      console.warn('myPeer error:', err);
-      if (err && err.type === 'peer-unavailable') {
+// ── ★ Создание Peer с retry по серверам ──
+function createPeerWithRetry(id = null, attempt = 0) {
+  return new Promise((resolve, reject) => {
+    if (attempt >= PEERJS_SERVERS.length) {
+      return reject(new Error(
+        'Не удалось подключиться ни к одному signaling-серверу PeerJS.\n\n' +
+        'Возможные причины:\n' +
+        '• Включён adblocker (uBlock Origin / Privacy Badger) — отключите для этого сайта\n' +
+        '• Корпоративный firewall блокирует WSS-порт 443\n' +
+        '• Публичные сервера PeerJS сейчас недоступны — попробуйте через 1-2 минуты'
+      ));
+    }
+    const server = PEERJS_SERVERS[(currentServerIdx + attempt) % PEERJS_SERVERS.length];
+    console.log(`[PeerJS] Попытка ${attempt + 1}/${PEERJS_SERVERS.length}: ${server.host}`);
+
+    const opts = {
+      host: server.host,
+      port: server.port,
+      path: server.path,
+      secure: server.secure,
+      config: ICE_CONFIG,
+      debug: 1,
+      // короткий timeout на коннект к signaling
+      pingInterval: 10000
+    };
+    const p = new Peer(id, opts);
+
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      console.warn(`[PeerJS] Таймаут на ${server.host}, пробуем следующий`);
+      try { p.destroy(); } catch (e) {}
+      resolve(createPeerWithRetry(id, attempt + 1));
+    }, 8000);
+
+    p.on('open', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      currentServerIdx = (currentServerIdx + attempt) % PEERJS_SERVERS.length;
+      console.log(`[PeerJS] ✓ Подключено к ${server.host} (id=${p.id})`);
+      setStatusOk(server.host);
+      resolve(p);
+    });
+    p.on('error', err => {
+      if (settled && err.type !== 'peer-unavailable' && err.type !== 'network') return;
+      // peer-unavailable — это нормально при подключении гостя, не считаем ошибкой сервера
+      if (err.type === 'peer-unavailable') {
         const errEl = getEl('join-error');
         if (errEl) errEl.textContent = 'Комната не найдена. Проверьте код или попросите друга создать её заново.';
-        const w = getEl('join-waiting'); if (w) w.classList.add('hidden');
-        const b = getEl('join-connect-btn'); if (b) b.disabled = false;
+        setStatusOk(server.host);
+        return;
       }
-      resolve(myPeer);
+      console.warn(`[PeerJS] Ошибка на ${server.host}:`, err.type, err.message);
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        try { p.destroy(); } catch (e) {}
+        resolve(createPeerWithRetry(id, attempt + 1));
+      } else {
+        // потеряли связь уже после коннекта
+        setStatusError();
+      }
     });
-    myPeer.on('disconnected', () => { try { myPeer.reconnect(); } catch (e) {} });
+    p.on('disconnected', () => {
+      try { p.reconnect(); } catch (e) {}
+    });
+    p.on('close', () => setStatusError());
   });
 }
 
+function setStatusOk(serverHost) {
+  const el = getEl('signaling-status');
+  if (el) el.innerHTML = `<span style="color:var(--success,#22c55e)">●</span> Signaling: ${serverHost}`;
+}
+function setStatusError() {
+  const el = getEl('signaling-status');
+  if (el) el.innerHTML = `<span style="color:#ef4444">●</span> Signaling: отключен (пробуем переподключиться...)`;
+}
+
+// ── Стабильный id нашего Peer ──
+async function ensureMyPeer() {
+  if (myPeer && !myPeer.destroyed) return myPeer;
+  let id = localStorage.getItem('myPeerId');
+  if (!id) { id = '0byte-u-' + CryptoSystem.generateKey().slice(0, 12); localStorage.setItem('myPeerId', id); }
+  myPeer = await createPeerWithRetry(id);
+  return myPeer;
+}
+
 // ── Хост: создать комнату ──
-function hostCreateRoom(code, onConn) {
-  return new Promise((resolve, reject) => {
-    const p = new Peer(roomIdFromCode(code), { config: ICE_CONFIG, debug: 1 });
-    p.on('open', () => resolve(p));
-    p.on('connection', conn => onConn(conn));
-    p.on('error', err => {
-      console.warn('host peer error:', err);
-      if (err && err.type === 'unavailable-id') { try { p.destroy(); } catch (e) {} reject(err); }
-    });
-  });
+async function hostCreateRoom(code, onConn) {
+  const p = await createPeerWithRetry(roomIdFromCode(code));
+  p.on('connection', conn => onConn(conn));
+  return p;
 }
 async function hostStart(onCode) {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -118,12 +188,13 @@ async function hostStart(onCode) {
       pendingHostPeer = p;
       onCode(roomCodeWords(code));
       return;
-    } catch (e) { /* код занят — пробуем новый */ }
+    } catch (e) {
+      if (attempt === 4) throw e;
+    }
   }
-  throw 'не удалось создать комнату';
 }
 function onHostConnection(conn, code) {
-  const pid = conn.peer; // стабильный id гостя
+  const pid = conn.peer;
   if (!contacts[pid]) contacts[pid] = { name: pid.slice(0, 8), avatar: '' };
   contacts[pid].role = 'host';
   contacts[pid].room = code;
@@ -161,7 +232,7 @@ async function reconnect(peerId) {
   if (!c || !c.room) return false;
   if (channels[peerId] && channels[peerId].readyState === 'open') return true;
   if (c.role === 'host') {
-    if (hostPeers[peerId] && !hostPeers[peerId].destroyed) return false; // уже ждём
+    if (hostPeers[peerId] && !hostPeers[peerId].destroyed) return false;
     try {
       const p = await hostCreateRoom(c.room, conn => onHostConnection(conn, c.room));
       hostPeers[peerId] = p;
@@ -187,7 +258,7 @@ function openChat(peerId) {
     if (!(channels[peerId] && channels[peerId].readyState === 'open')) {
       const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
     }
-  }, 6000);
+  }, 8000);
 }
 function restoreChat() {
   const peerId = activePeer || connectedPeerId;
@@ -218,7 +289,6 @@ function setupDataChannel(peerId, role = 'unknown') {
     keyIntervals[peerId] = setInterval(() => { if (ch.readyState === 'open') sendKey(); else clearInterval(keyIntervals[peerId]); }, 400);
     ch.send(JSON.stringify({ type: 'hello', name: myName, avatar: myAvatar }));
     updateOnlineStatus();
-    // Верификация отпечатка (DTLS) — защита от MITM
     try {
       const pc = ch.conn && ch.conn.peerConnection;
       if (pc && pc.localDescription && pc.remoteDescription) {

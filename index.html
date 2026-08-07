@@ -113,7 +113,14 @@
     <div class="modal-body">
       <div class="form-group"><label>Имя:</label><input type="text" id="name-input"></div>
       <div class="form-group"><label>Аватар (эмодзи):</label><input type="text" id="avatar-input" maxlength="4"></div>
-      <div class="form-group toggle-group"><label for="theme-toggle">Тёмная тема</label><input type="checkbox" id="theme-toggle" onchange="toggleTheme()"></div>
+      <div class="form-group">
+  <label>URL Signaling-сервера:</label>
+  <input type="text" id="signaling-url-input" placeholder="https://0byte-signaling.xxx.workers.dev">
+</div>
+      <div class="form-group toggle-group">
+        <label for="theme-toggle">Тёмная тема</label>
+        <input type="checkbox" id="theme-toggle" onchange="toggleTheme()">
+      </div>
       <div class="divider"><span>Опасная зона</span></div>
       <div class="button-group"><button class="btn-danger" onclick="deleteAllChats()">🗑 Удалить все чаты</button></div>
       <div class="button-group">

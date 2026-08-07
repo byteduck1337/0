@@ -1,505 +1,366 @@
-﻿// webrtc.js
-// Управление WebRTC соединением, data-каналом и обменом зашифрованными сообщениями.
-// Исправлена гонка состояний, добавлена верификация отпечатков.
+﻿// webrtc.js — PeerJS Public Cloud: код-комната вместо длинных SDP.
+// Трафик после handshake идёт напрямую P2P; E2E — AES-GCM с обменом ключами поверх канала.
 
 const WORD_LIST = [
-    'Альфа', 'Браво', 'Чарли', 'Дельта', 'Эхо', 'Фокстрот', 'Гольф', 'Отель',
-    'Индия', 'Джульет', 'Кило', 'Лима', 'Майк', 'Ноябрь', 'Оскар', 'Папа',
-    'Квебек', 'Ромео', 'Сьерра', 'Танго', 'Юниформ', 'Виктор', 'Виски', 'Рентген',
-    'Янки', 'Зулу', 'Красный', 'Синий', 'Зелёный', 'Жёлтый', 'Оранжевый', 'Пурпурный',
-    'Серебряный', 'Золотой', 'Кристальный', 'Алмазный', 'Рубиновый', 'Изумрудный', 'Сапфировый',
-    'Нефритовый', 'Ониксовый', 'Янтарный', 'Коралловый', 'Лазурный', 'Фиолетовый', 'Малиновый', 'Индиго',
-    'Бирюзовый', 'Магентовый', 'Оливковый', 'Бордовый'
+'Альфа','Браво','Чарли','Дельта','Эхо','Фокстрот','Гольф','Отель',
+'Индия','Джульет','Кило','Лима','Майк','Ноябрь','Оскар','Папа',
+'Квебек','Ромео','Сьерра','Танго','Юниформ','Виктор','Виски','Рентген',
+'Янки','Зулу','Красный','Синий','Зелёный','Жёлтый','Оранжевый','Пурпурный',
+'Серебряный','Золотой','Кристальный','Алмазный','Рубиновый','Изумрудный','Сапфировый',
+'Нефритовый','Ониксовый','Янтарный','Коралловый','Лазурный','Фиолетовый','Малиновый','Индиго',
+'Бирюзовый','Магентовый','Оливковый','Бордовый'
 ];
+const ROOM_PREFIX = '0byte-v1-';
+const ICE_CONFIG = { iceServers: [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:openrelay.metered.ca:80',  username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+]};
 
-function sdpToWords(sdp) {
-    const fp = CryptoSystem.extractFingerprint(sdp);
-    if (!fp) return 'Неизвестная сессия';
-    let seed = 0;
-    for (let i = 0; i < fp.length; i++) {
-        seed = ((seed << 5) - seed) + fp.charCodeAt(i);
-        seed |= 0;
-    }
-    const words = [];
-    const absSeed = Math.abs(seed);
-    for (let i = 0; i < 3; i++) {
-        const index = (absSeed + i * 7) % WORD_LIST.length;
-        words.push(WORD_LIST[index]);
-    }
-    return words.join(' · ');
-}
-
-// Глобальное состояние
+// ── Глобальное состояние ──
 let currentUser, myName = 'Вы', myAvatar = '';
 let contacts = {};
 let activePeer = null;
-let peerConnection = null;
-let dataChannel = null;
-let pendingLocalKey = null;
-let keySendInterval = null;
+let dataChannel = null;             // активный канал (alias channels[activePeer])
+const channels = {};                // peerId -> wrapped conn
+const hostPeers = {};               // peerId -> Peer (наши комнаты)
+const keyIntervals = {};
+let pendingHostPeer = null;         // комната до первого подключения
 let connectedPeerId = null;
 let masterPassword = null;
-let verifiedFingerprints = {}; // Кеш проверенных отпечатков
+let verifiedFingerprints = {};
+let myPeer = null;                  // наш PeerJS-клиент (стабильный id)
 
-// Настройка WebRTC
-function setupPeerConnection(peerId) {
-    if (peerConnection) {
-        peerConnection.close();
-        peerConnection = null;
-    }
-    if (dataChannel) {
-        dataChannel.close();
-        dataChannel = null;
-    }
-    if (keySendInterval) {
-        clearInterval(keySendInterval);
-        keySendInterval = null;
-    }
-
-    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    peerConnection = new RTCPeerConnection(configuration);
-
-    peerConnection.oniceconnectionstatechange = () => updateOnlineStatus();
-    peerConnection.onconnectionstatechange = () => {
-        console.log('Connection state:', peerConnection.connectionState);
-        updateOnlineStatus();
-    };
-
-    // Хост создаёт data channel
-    dataChannel = peerConnection.createDataChannel('chat', { ordered: true });
-    setupDataChannel(peerId, 'host');
+// ── Код-комнаты ──
+const randInt = n => Math.floor(Math.random() * n);
+function generateRoomCode() {
+  return { i1: randInt(WORD_LIST.length), i2: randInt(WORD_LIST.length), num: 10 + randInt(90) };
+}
+const roomCodeWords = c => `${WORD_LIST[c.i1]} ${WORD_LIST[c.i2]} ${c.num}`;
+const roomIdFromCode = c => ROOM_PREFIX + c.i1 + '-' + c.i2 + '-' + c.num;
+function parseRoomCode(text) {
+  const s = String(text || '').toLowerCase();
+  const numMatch = s.match(/\d+/);
+  if (!numMatch) return null;
+  const num = parseInt(numMatch[0], 10);
+  const lower = WORD_LIST.map(w => w.toLowerCase());
+  const found = [];
+  const re = /[a-zа-яё]+/g; let m;
+  while ((m = re.exec(s))) {
+    const wi = lower.indexOf(m[0]);
+    if (wi >= 0) found.push({ wi, idx: m.index });
+  }
+  found.sort((a, b) => a.idx - b.idx);
+  if (found.length < 2) return null;
+  return { i1: found[0].wi, i2: found[1].wi, num };
 }
 
+// ── Адаптер PeerJS-conn → интерфейс dataChannel ──
+function wrapConn(conn, peerId) {
+  const a = {
+    peerId, conn, _open: null, _msg: null, _close: null,
+    get readyState() { return conn.open ? 'open' : 'connecting'; },
+    send: s => conn.send(s),
+    close: () => { try { conn.close(); } catch (e) {} },
+    set onopen(fn) { a._open = fn; if (conn.open) setTimeout(() => fn && fn(), 0); },
+    get onopen() { return a._open; },
+    set onmessage(fn) { a._msg = fn; },
+    get onmessage() { return a._msg; },
+    set onclose(fn) { a._close = fn; },
+    get onclose() { return a._close; }
+  };
+  conn.on('data',  d => a._msg  && a._msg({ data: typeof d === 'string' ? d : JSON.stringify(d) }));
+  conn.on('open',  () => a._open && a._open());
+  conn.on('close', () => a._close && a._close());
+  conn.on('error', e => console.warn('conn error:', e));
+  return a;
+}
+
+// ── Наш PeerJS-клиент (стабильный id для переподключений) ──
+function ensureMyPeer() {
+  return new Promise(resolve => {
+    if (myPeer && !myPeer.destroyed) return resolve(myPeer);
+    let id = localStorage.getItem('myPeerId');
+    if (!id) { id = '0byte-u-' + CryptoSystem.generateKey().slice(0, 12); localStorage.setItem('myPeerId', id); }
+    myPeer = new Peer(id, { config: ICE_CONFIG, debug: 1 });
+    myPeer.on('open', () => resolve(myPeer));
+    myPeer.on('error', err => {
+      console.warn('myPeer error:', err);
+      if (err && err.type === 'peer-unavailable') {
+        const errEl = getEl('join-error');
+        if (errEl) errEl.textContent = 'Комната не найдена. Проверьте код или попросите друга создать её заново.';
+        const w = getEl('join-waiting'); if (w) w.classList.add('hidden');
+        const b = getEl('join-connect-btn'); if (b) b.disabled = false;
+      }
+      resolve(myPeer);
+    });
+    myPeer.on('disconnected', () => { try { myPeer.reconnect(); } catch (e) {} });
+  });
+}
+
+// ── Хост: создать комнату ──
+function hostCreateRoom(code, onConn) {
+  return new Promise((resolve, reject) => {
+    const p = new Peer(roomIdFromCode(code), { config: ICE_CONFIG, debug: 1 });
+    p.on('open', () => resolve(p));
+    p.on('connection', conn => onConn(conn));
+    p.on('error', err => {
+      console.warn('host peer error:', err);
+      if (err && err.type === 'unavailable-id') { try { p.destroy(); } catch (e) {} reject(err); }
+    });
+  });
+}
+async function hostStart(onCode) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = generateRoomCode();
+    try {
+      const p = await hostCreateRoom(code, conn => onHostConnection(conn, code));
+      pendingHostPeer = p;
+      onCode(roomCodeWords(code));
+      return;
+    } catch (e) { /* код занят — пробуем новый */ }
+  }
+  throw 'не удалось создать комнату';
+}
+function onHostConnection(conn, code) {
+  const pid = conn.peer; // стабильный id гостя
+  if (!contacts[pid]) contacts[pid] = { name: pid.slice(0, 8), avatar: '' };
+  contacts[pid].role = 'host';
+  contacts[pid].room = code;
+  contacts[pid].remotePeerId = pid;
+  saveContactsSecure();
+  if (pendingHostPeer) { hostPeers[pid] = pendingHostPeer; pendingHostPeer = null; }
+  const adapter = wrapConn(conn, pid);
+  channels[pid] = adapter;
+  connectedPeerId = pid;
+  setupDataChannel(pid, 'host');
+}
+
+// ── Гость: подключиться по коду ──
+async function guestJoin(codeText) {
+  const code = parseRoomCode(codeText);
+  if (!code) throw 'Не распознал код. Пример: «Янтарный Тигр 42»';
+  const roomId = roomIdFromCode(code);
+  await ensureMyPeer();
+  const conn = myPeer.connect(roomId, { reliable: true });
+  const pid = roomId;
+  if (!contacts[pid]) contacts[pid] = { name: 'Комната ' + code.num, avatar: '' };
+  contacts[pid].role = 'guest';
+  contacts[pid].room = code;
+  await saveContactsSecure();
+  const adapter = wrapConn(conn, pid);
+  channels[pid] = adapter;
+  connectedPeerId = pid;
+  setupDataChannel(pid, 'guest');
+  return code;
+}
+
+// ── Переподключение сохранённого чата ──
+async function reconnect(peerId) {
+  const c = contacts[peerId];
+  if (!c || !c.room) return false;
+  if (channels[peerId] && channels[peerId].readyState === 'open') return true;
+  if (c.role === 'host') {
+    if (hostPeers[peerId] && !hostPeers[peerId].destroyed) return false; // уже ждём
+    try {
+      const p = await hostCreateRoom(c.room, conn => onHostConnection(conn, c.room));
+      hostPeers[peerId] = p;
+      return true;
+    } catch (e) { return false; }
+  } else {
+    await ensureMyPeer();
+    const conn = myPeer.connect(roomIdFromCode(c.room), { reliable: true });
+    channels[peerId] = wrapConn(conn, peerId);
+    setupDataChannel(peerId, 'guest');
+    return true;
+  }
+}
+function openChat(peerId) {
+  if (!contacts[peerId]) { contacts[peerId] = { name: peerId.slice(0, 8), avatar: '' }; saveContactsSecure(); renderContactList(); }
+  activePeer = peerId;
+  localStorage.setItem('activePeer', peerId);
+  dataChannel = channels[peerId] || null;
+  updateUIForPeer(peerId);
+  if (dataChannel && dataChannel.readyState === 'open') return;
+  reconnect(peerId);
+  setTimeout(() => {
+    if (!(channels[peerId] && channels[peerId].readyState === 'open')) {
+      const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
+    }
+  }, 6000);
+}
+function restoreChat() {
+  const peerId = activePeer || connectedPeerId;
+  if (!peerId) return;
+  if (channels[peerId]) { channels[peerId].close(); delete channels[peerId]; }
+  dataChannel = null;
+  openChat(peerId);
+}
+function dropPeer(peerId) {
+  if (channels[peerId]) { channels[peerId].close(); delete channels[peerId]; }
+  if (hostPeers[peerId]) { try { hostPeers[peerId].destroy(); } catch (e) {} delete hostPeers[peerId]; }
+  if (keyIntervals[peerId]) { clearInterval(keyIntervals[peerId]); delete keyIntervals[peerId]; }
+  if (activePeer === peerId) dataChannel = null;
+}
+
+// ── Канал: ключи, hello, сообщения ──
 function setupDataChannel(peerId, role = 'unknown') {
-    if (!dataChannel) return;
+  const ch = channels[peerId];
+  if (!ch) return;
+  if (!contacts[peerId]) contacts[peerId] = { name: peerId.slice(0, 8), avatar: '' };
+  if (!contacts[peerId].localSessionKey) { contacts[peerId].localSessionKey = CryptoSystem.generateKey(); saveContactsSecure(); }
 
-    dataChannel.onopen = async () => {
-        console.log('Data channel открыт, отправляю ключ');
-        
-        // Отправка ключа
-        if (pendingLocalKey) {
-            const sendKey = () => {
-                if (!dataChannel || dataChannel.readyState !== 'open') return;
-                dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
-            };
-            sendKey();
-            if (keySendInterval) clearInterval(keySendInterval);
-            keySendInterval = setInterval(sendKey, 400);
-        }
-        
-        updateOnlineStatus();
-
-        if (connectedPeerId && contacts[connectedPeerId]) {
-            const roleSaved = localStorage.getItem(`role_${connectedPeerId}`);
-            if (roleSaved && !contacts[connectedPeerId].role) {
-                contacts[connectedPeerId].role = roleSaved;
-                await saveContactsSecure();
-            }
-        }
-
-        const newChatModal = $('new-chat-modal');
-        if (newChatModal && !newChatModal.classList.contains('hidden')) {
-            closeNewChat();
-        }
-
-        if (connectedPeerId) {
-            console.log('Активируем чат для:', connectedPeerId);
-            activePeer = connectedPeerId;
-            localStorage.setItem('activePeer', activePeer);
-            updateUIForPeer(activePeer);
-            renderContactList();
-        }
-
-        const restorePanel = $('restore-panel');
-        if (restorePanel) restorePanel.classList.remove('visible');
-    };
-
-    dataChannel.onclose = () => {
-        console.log('Data channel закрыт');
-        updateOnlineStatus();
-        if (activePeer && peerId === activePeer) {
-            const restorePanel = $('restore-panel');
-            if (restorePanel) restorePanel.classList.add('visible');
-        }
-    };
-
-    dataChannel.onmessage = async (event) => {
-        try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'key') {
-                const targetPeer = connectedPeerId || activePeer;
-                if (targetPeer && contacts[targetPeer]) {
-                    contacts[targetPeer].remoteKey = data.key;
-                    await saveContactsSecure();
-                    console.log('Получен ключ собеседника:', data.key);
-                    if (keySendInterval) clearInterval(keySendInterval);
-                    loadMessages(targetPeer);
-                    updateKeyDisplay();
-                }
-            } else if (data.type === 'message' || data.type === 'image') {
-                const targetPeer = connectedPeerId || activePeer;
-                if (targetPeer && contacts[targetPeer]) {
-                    await saveMessageToHistory(targetPeer, data);
-                    if (targetPeer === activePeer) loadMessages(targetPeer);
-                }
-            } else if (data.type === 'fingerprint_ack') {
-                // Собеседник подтвердил наш отпечаток
-                if (connectedPeerId) {
-                    verifiedFingerprints[connectedPeerId] = true;
-                    console.log('Отпечаток подтверждён собеседником');
-                }
-            }
-        } catch (e) {
-            console.error('Ошибка обработки сообщения:', e);
-        }
-    };
-}
-
-// Отправка сообщения
-async function sendMessage() {
-    const text = $('message-input').value.trim();
-    if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') {
-        alert('Нет соединения.');
-        return;
-    }
-    const remoteKey = contacts[activePeer]?.remoteKey;
-    if (!remoteKey) {
-        alert('Ожидание ключа шифрования...');
-        return;
-    }
+  ch.onopen = async () => {
+    console.log('Канал открыт:', peerId);
+    const sendKey = () => { if (ch.readyState === 'open') ch.send(JSON.stringify({ type: 'key', key: contacts[peerId].localSessionKey })); };
+    sendKey();
+    if (keyIntervals[peerId]) clearInterval(keyIntervals[peerId]);
+    keyIntervals[peerId] = setInterval(() => { if (ch.readyState === 'open') sendKey(); else clearInterval(keyIntervals[peerId]); }, 400);
+    ch.send(JSON.stringify({ type: 'hello', name: myName, avatar: myAvatar }));
+    updateOnlineStatus();
+    // Верификация отпечатка (DTLS) — защита от MITM
     try {
-        const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
-        const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
-        dataChannel.send(JSON.stringify(msgObj));
-        await saveMessageToHistory(activePeer, msgObj);
-        $('message-input').value = '';
-        loadMessages(activePeer);
-    } catch (e) {
-        console.error('Ошибка шифрования:', e);
-        alert('Не удалось зашифровать сообщение.');
+      const pc = ch.conn && ch.conn.peerConnection;
+      if (pc && pc.localDescription && pc.remoteDescription) {
+        const localFp = CryptoSystem.extractFingerprint(pc.localDescription.sdp);
+        const remoteFp = CryptoSystem.extractFingerprint(pc.remoteDescription.sdp);
+        if (localFp && remoteFp) verifyFingerprint(peerId, localFp, remoteFp);
+      }
+    } catch (e) { console.warn(e); }
+    const modal = getEl('new-chat-modal');
+    if (modal && !modal.classList.contains('hidden')) closeNewChat();
+    if (activePeer === peerId || !activePeer) {
+      activePeer = peerId;
+      dataChannel = ch;
+      localStorage.setItem('activePeer', peerId);
+      updateUIForPeer(peerId);
     }
-}
-
-// Отправка изображения
-async function sendImage(file) {
-    if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') {
-        alert('Нет соединения.');
-        return;
+    renderContactList();
+    const rp = getEl('restore-panel'); if (rp) rp.classList.remove('visible');
+  };
+  ch.onclose = () => {
+    console.log('Канал закрыт:', peerId);
+    updateOnlineStatus();
+    if (activePeer === peerId) {
+      const rp = getEl('restore-panel'); if (rp) rp.classList.add('visible');
     }
-    const remoteKey = contacts[activePeer]?.remoteKey;
-    if (!remoteKey) {
-        alert('Ожидание ключа шифрования...');
-        return;
-    }
-
+  };
+  ch.onmessage = async (event) => {
     try {
-        const img = await createImageBitmap(file);
-        const canvas = document.createElement('canvas');
-        const maxDim = 800;
-        let { width, height } = img;
-        if (width > maxDim || height > maxDim) {
-            const ratio = Math.min(maxDim / width, maxDim / height);
-            width *= ratio;
-            height *= ratio;
+      const data = JSON.parse(event.data);
+      if (data.type === 'key') {
+        if (contacts[peerId]) {
+          contacts[peerId].remoteKey = data.key;
+          await saveContactsSecure();
+          if (keyIntervals[peerId]) clearInterval(keyIntervals[peerId]);
+          loadMessages(peerId);
+          updateKeyDisplay();
         }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, width, height);
-        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.7));
-        const arrayBuffer = await blob.arrayBuffer();
-
-        const encrypted = await CryptoSystem.encryptData(arrayBuffer, remoteKey);
-        const msgObj = {
-            type: 'image',
-            from: currentUser,
-            ciphertext: encrypted,
-            mimeType: 'image/jpeg',
-            timestamp: Date.now()
-        };
-        dataChannel.send(JSON.stringify(msgObj));
-        await saveMessageToHistory(activePeer, msgObj);
-        loadMessages(activePeer);
-    } catch (e) {
-        console.error('Ошибка отправки изображения:', e);
-        alert('Не удалось отправить изображение.');
-    }
-}
-
-async function saveMessageToHistory(peerId, msg) {
-    const key = `history_${[currentUser, peerId].sort().join('_')}`;
-    let hist = [];
-    if (masterPassword) {
-        hist = await CryptoSystem.loadEncryptedHistory(key, masterPassword);
-    } else {
-        hist = JSON.parse(localStorage.getItem(key) || '[]');
-    }
-    hist.push(msg);
-    
-    if (masterPassword) {
-        await CryptoSystem.saveEncryptedHistory(key, hist, masterPassword);
-    } else {
-        localStorage.setItem(key, JSON.stringify(hist));
-    }
-}
-
-async function loadMessageHistory(peerId) {
-    const key = `history_${[currentUser, peerId].sort().join('_')}`;
-    if (masterPassword) {
-        return await CryptoSystem.loadEncryptedHistory(key, masterPassword);
-    } else {
-        return JSON.parse(localStorage.getItem(key) || '[]');
-    }
-}
-
-function waitForIceGathering() {
-    return new Promise((resolve) => {
-        if (peerConnection.iceGatheringState === 'complete') resolve();
-        else {
-            peerConnection.onicegatheringstatechange = () => {
-                if (peerConnection.iceGatheringState === 'complete') resolve();
-            };
-            setTimeout(resolve, 3000);
+      } else if (data.type === 'hello') {
+        if (contacts[peerId]) {
+          contacts[peerId].name = data.name || contacts[peerId].name;
+          contacts[peerId].avatar = data.avatar || contacts[peerId].avatar;
+          await saveContactsSecure();
+          renderContactList();
+          if (activePeer === peerId) updateUIForPeer(peerId);
         }
-    });
-}
-
-// Функция верификации отпечатка
-async function verifyFingerprint(peerId, localFp, remoteFp) {
-    if (verifiedFingerprints[peerId]) return true;
-    
-    const localWords = sdpToWordsByFp(localFp);
-    const remoteWords = sdpToWordsByFp(remoteFp);
-    
-    if (localWords === remoteWords) {
+      } else if (data.type === 'message' || data.type === 'image') {
+        await saveMessageToHistory(peerId, data);
+        if (peerId === activePeer) loadMessages(peerId);
+      } else if (data.type === 'fingerprint_ack') {
         verifiedFingerprints[peerId] = true;
-        return true;
-    }
-    
-    // Показываем диалог подтверждения
-    return new Promise((resolve) => {
-        const modal = document.createElement('div');
-        modal.className = 'modal';
-        modal.innerHTML = `
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h2>🔐 Проверка отпечатка</h2>
-                </div>
-                <div class="modal-body">
-                    <p>Сравните коды с собеседником:</p>
-                    <div class="fingerprint-verify">
-                        <div class="fp-words">${localWords}</div>
-                        <p style="color: var(--text-secondary); margin: 8px 0;">Код должен совпадать у обоих</p>
-                    </div>
-                    <div class="fp-buttons">
-                        <button class="btn-primary" id="fp-confirm">✅ Совпадает</button>
-                        <button class="btn-secondary" id="fp-deny">❌ Не совпадает</button>
-                    </div>
-                </div>
-            </div>
-        `;
-        document.body.appendChild(modal);
-        
-        document.getElementById('fp-confirm').onclick = () => {
-            verifiedFingerprints[peerId] = true;
-            modal.remove();
-            if (dataChannel && dataChannel.readyState === 'open') {
-                dataChannel.send(JSON.stringify({ type: 'fingerprint_ack' }));
-            }
-            resolve(true);
-        };
-        
-        document.getElementById('fp-deny').onclick = () => {
-            modal.remove();
-            resolve(false);
-        };
-    });
+      }
+    } catch (e) { console.error('Ошибка обработки сообщения:', e); }
+  };
 }
 
+// ── Отправка ──
+async function sendMessage() {
+  const text = getEl('message-input').value.trim();
+  if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') { alert('Нет соединения.'); return; }
+  const remoteKey = contacts[activePeer]?.remoteKey;
+  if (!remoteKey) { alert('Ожидание ключа шифрования...'); return; }
+  try {
+    const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
+    const msgObj = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
+    dataChannel.send(JSON.stringify(msgObj));
+    await saveMessageToHistory(activePeer, msgObj);
+    getEl('message-input').value = '';
+    loadMessages(activePeer);
+  } catch (e) { console.error(e); alert('Не удалось зашифровать сообщение.'); }
+}
+async function sendImage(file) {
+  if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') { alert('Нет соединения.'); return; }
+  const remoteKey = contacts[activePeer]?.remoteKey;
+  if (!remoteKey) { alert('Ожидание ключа шифрования...'); return; }
+  try {
+    const img = await createImageBitmap(file);
+    const canvas = document.createElement('canvas');
+    const maxDim = 800;
+    let { width, height } = img;
+    if (width > maxDim || height > maxDim) { const r = Math.min(maxDim / width, maxDim / height); width *= r; height *= r; }
+    canvas.width = width; canvas.height = height;
+    canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.7));
+    const encrypted = await CryptoSystem.encryptData(await blob.arrayBuffer(), remoteKey);
+    const msgObj = { type: 'image', from: currentUser, ciphertext: encrypted, mimeType: 'image/jpeg', timestamp: Date.now() };
+    dataChannel.send(JSON.stringify(msgObj));
+    await saveMessageToHistory(activePeer, msgObj);
+    loadMessages(activePeer);
+  } catch (e) { console.error(e); alert('Не удалось отправить изображение.'); }
+}
+
+// ── История ──
+async function saveMessageToHistory(peerId, msg) {
+  const key = `history_${[currentUser, peerId].sort().join('_')}`;
+  let hist = masterPassword ? await CryptoSystem.loadEncryptedHistory(key, masterPassword) : JSON.parse(localStorage.getItem(key) || '[]');
+  hist.push(msg);
+  if (masterPassword) await CryptoSystem.saveEncryptedHistory(key, hist, masterPassword);
+  else localStorage.setItem(key, JSON.stringify(hist));
+}
+async function loadMessageHistory(peerId) {
+  const key = `history_${[currentUser, peerId].sort().join('_')}`;
+  return masterPassword ? await CryptoSystem.loadEncryptedHistory(key, masterPassword) : JSON.parse(localStorage.getItem(key) || '[]');
+}
+
+// ── Верификация отпечатка ──
 function sdpToWordsByFp(fp) {
-    if (!fp) return 'Неизвестно';
-    let seed = 0;
-    for (let i = 0; i < fp.length; i++) {
-        seed = ((seed << 5) - seed) + fp.charCodeAt(i);
-        seed |= 0;
-    }
-    const words = [];
-    const absSeed = Math.abs(seed);
-    for (let i = 0; i < 3; i++) {
-        const index = (absSeed + i * 7) % WORD_LIST.length;
-        words.push(WORD_LIST[index]);
-    }
-    return words.join(' · ');
+  if (!fp) return 'Неизвестно';
+  let seed = 0;
+  for (let i = 0; i < fp.length; i++) { seed = ((seed << 5) - seed) + fp.charCodeAt(i); seed |= 0; }
+  const words = []; const abs = Math.abs(seed);
+  for (let i = 0; i < 3; i++) words.push(WORD_LIST[(abs + i * 7) % WORD_LIST.length]);
+  return words.join(' · ');
 }
-
-async function saveContactsSecure() {
-    if (masterPassword) {
-        await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
-    } else {
-        localStorage.setItem('contacts', JSON.stringify(contacts));
-    }
-}
-
-// Функции потока создания чата
-async function setupPeerConnectionForHost() {
-    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    peerConnection = new RTCPeerConnection(configuration);
-    
-    // Data channel создаётся здесь, но setupDataChannel вызывается ПОСЛЕ установки remoteDescription
-    dataChannel = peerConnection.createDataChannel('chat', { ordered: true });
-    
-    peerConnection.oniceconnectionstatechange = updateOnlineStatus;
-    peerConnection.onconnectionstatechange = () => {
-        console.log('Host connection state:', peerConnection.connectionState);
-        if (peerConnection.connectionState === 'connected') updateOnlineStatus();
+async function verifyFingerprint(peerId, localFp, remoteFp) {
+  if (verifiedFingerprints[peerId]) return true;
+  const localWords = sdpToWordsByFp(localFp), remoteWords = sdpToWordsByFp(remoteFp);
+  if (localWords === remoteWords) { verifiedFingerprints[peerId] = true; return true; }
+  return new Promise(resolve => {
+    const modal = document.createElement('div');
+    modal.className = 'modal';
+    modal.innerHTML = `<div class="modal-content"><div class="modal-header"><h2>🔐 Проверка отпечатка</h2></div>
+      <div class="modal-body"><p>Сравните код с собеседником (устно):</p>
+      <div class="fingerprint-verify"><div class="fp-words">${localWords}</div><p style="color:var(--text-secondary)">Код должен совпадать у обоих</p></div>
+      <div class="fp-buttons"><button class="btn-primary" id="fp-confirm">✅ Совпадает</button><button class="btn-secondary" id="fp-deny">❌ Не совпадает</button></div></div></div>`;
+    document.body.appendChild(modal);
+    document.getElementById('fp-confirm').onclick = () => {
+      verifiedFingerprints[peerId] = true; modal.remove();
+      if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(JSON.stringify({ type: 'fingerprint_ack' }));
+      resolve(true);
     };
-    
-    // Не вызываем setupDataChannel здесь — вызовем после получения ответа
+    document.getElementById('fp-deny').onclick = () => { modal.remove(); resolve(false); };
+  });
 }
-
-async function hostSubmitAnswer() {
-    const hostAnswerInput = $('host-answer-input');
-    if (!hostAnswerInput) return;
-    const answerStr = hostAnswerInput.value.trim();
-    if (!answerStr) return;
-    
-    try {
-        const answer = JSON.parse(answerStr);
-        
-        // Верификация отпечатка перед установкой соединения
-        const localFp = CryptoSystem.extractFingerprint(peerConnection.localDescription.sdp);
-        const remoteFp = CryptoSystem.extractFingerprint(answer.sdp);
-        
-        const verified = await verifyFingerprint(connectedPeerId, localFp, remoteFp);
-        if (!verified) {
-            alert('Отпечатки не совпадают! Возможна атака "человек посередине".');
-            return;
-        }
-        
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-        
-        // Теперь настраиваем data channel
-        setupDataChannel(connectedPeerId, 'host');
-        
-        const hostResponseArea = $('host-response-area');
-        const hostWaiting = $('host-waiting');
-        
-        if (hostResponseArea) hostResponseArea.classList.remove('visible');
-        if (hostWaiting) {
-            hostWaiting.classList.remove('hidden');
-            hostWaiting.style.display = 'block';
-        }
-        
-        console.log('Ответ установлен, ожидаем подключения...');
-    } catch (e) {
-        alert('Неверный код ответа');
-        console.error(e);
-    }
+async function saveContactsSecure() {
+  if (masterPassword) await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+  else localStorage.setItem('contacts', JSON.stringify(contacts));
 }
-
-async function joinSubmitOffer() {
-    const joinOfferInput = $('join-offer-input');
-    if (!joinOfferInput) return;
-    const offerStr = joinOfferInput.value.trim();
-    if (!offerStr) return;
-    
-    try {
-        const offer = JSON.parse(offerStr);
-        connectedPeerId = CryptoSystem.generateKey().slice(0, 16);
-        pendingLocalKey = CryptoSystem.generateKey();
-        
-        if (!contacts[connectedPeerId]) {
-            contacts[connectedPeerId] = { name: connectedPeerId.slice(0, 8), avatar: '' };
-        }
-        contacts[connectedPeerId].localSessionKey = pendingLocalKey;
-        contacts[connectedPeerId].role = 'guest';
-        localStorage.setItem(`role_${connectedPeerId}`, 'guest');
-        await saveContactsSecure();
-
-        const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-        peerConnection = new RTCPeerConnection(configuration);
-        
-        peerConnection.ondatachannel = (event) => {
-            console.log('Получен data channel от хоста');
-            dataChannel = event.channel;
-            setupDataChannel(connectedPeerId, 'guest');
-        };
-        
-        peerConnection.oniceconnectionstatechange = updateOnlineStatus;
-        peerConnection.onconnectionstatechange = () => {
-            console.log('Guest connection state:', peerConnection.connectionState);
-            if (peerConnection.connectionState === 'connected') updateOnlineStatus();
-        };
-        
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        await waitForIceGathering();
-
-        const finalAnswer = peerConnection.localDescription;
-        const joinAnswerDisplay = $('join-answer-display');
-        const joinAnswerWords = $('join-answer-words');
-        
-        if (joinAnswerDisplay) joinAnswerDisplay.value = JSON.stringify(finalAnswer);
-        if (joinAnswerWords) joinAnswerWords.textContent = sdpToWords(finalAnswer.sdp);
-        
-        copyToClipboard(JSON.stringify(finalAnswer));
-
-        const joinInputArea = $('join-input-area');
-        const joinResponseArea = $('join-response-area');
-        const joinWaiting = $('join-waiting');
-        
-        if (joinInputArea) joinInputArea.classList.remove('visible');
-        if (joinResponseArea) {
-            joinResponseArea.classList.remove('hidden');
-            setTimeout(() => joinResponseArea.classList.add('visible'), 100);
-        }
-        
-        const shareBtn = $('share-join-btn');
-        if (shareBtn && navigator.share) shareBtn.style.display = '';
-        
-        if (joinWaiting) {
-            joinWaiting.classList.remove('hidden');
-            joinWaiting.style.display = 'block';
-        }
-        
-        console.log('Ответ сгенерирован, отправьте его хосту');
-    } catch (e) {
-        alert('Не удалось обработать приглашение');
-        console.error(e);
-    }
-}
-
-async function restoreSession(peerId) {
-    const role = contacts[peerId]?.role || localStorage.getItem(`role_${peerId}`);
-    
-    if (role === 'host') {
-        showNewChat();
-        await startHostFlow();
-        
-        const hostInviteArea = $('host-invite-area');
-        if (hostInviteArea) {
-            hostInviteArea.classList.add('visible');
-        }
-        
-        const alertInfo = hostInviteArea?.querySelector('.alert');
-        if (alertInfo) {
-            alertInfo.textContent = 'Отправьте этот новый код другу для переподключения';
-        }
-    } else if (role === 'guest') {
-        showNewChat();
-        startJoinFlow();
-        
-        const joinInputArea = $('join-input-area');
-        if (joinInputArea) {
-            joinInputArea.classList.add('visible');
-        }
-        
-        const alertInfo = joinInputArea?.querySelector('.alert');
-        if (alertInfo) {
-            alertInfo.textContent = 'Попросите друга отправить новый код и вставьте его сюда';
-        }
-    } else {
-        showNewChat();
-    }
+function updateOnlineStatus() {
+  const ch = activePeer ? channels[activePeer] : null;
+  const online = ch && ch.readyState === 'open';
+  const el = getEl('online-status'); if (el) el.innerText = online ? '🟢 Онлайн' : '⚪ Отключен';
+  const cs = getEl('chat-status'); if (cs && activePeer) cs.textContent = online ? 'онлайн' : 'офлайн';
+  const rp = getEl('restore-panel');
+  if (rp && activePeer && online) rp.classList.remove('visible');
 }

@@ -47,6 +47,8 @@ async function showMasterPasswordPrompt(isFirstTime = false) {
 async function loadSettings() {
   myName = localStorage.getItem('myName') || 'Вы';
   myAvatar = localStorage.getItem('myAvatar') || '';
+  const sigUrl = getEl('signaling-url-input');
+if (sigUrl) sigUrl.value = localStorage.getItem('signalingUrl') || '';
   currentUser = localStorage.getItem('uid');
   if (!currentUser) { currentUser = CryptoSystem.generateKey().slice(0, 16); localStorage.setItem('uid', currentUser); }
   const n = getEl('name-input'); if (n) n.value = myName;

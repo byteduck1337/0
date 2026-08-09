@@ -4,6 +4,11 @@ class CryptoSystem {
         crypto.getRandomValues(a);
         return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
     }
+    static generateNonce() {
+        let a = new Uint8Array(12);
+        crypto.getRandomValues(a);
+        return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
+    }
     static hexToBytes(a) {
         let b = new Uint8Array(a.length / 2);
         for (let c = 0; c < b.length; c++) b[c] = parseInt(a.substr(c * 2, 2), 16);

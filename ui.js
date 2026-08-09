@@ -38,17 +38,43 @@ const UI = {
             title.textContent = isCreate ? 'Создание ключа' : 'Авторизация';
             desc.textContent = isCreate ? 'Придумайте надежный пароль.' : 'Введите пароль для доступа.';
             btn.textContent = isCreate ? 'Создать' : 'Войти';
-            confirm.classList.toggle('hidden', !isCreate);
-            input.value = ''; confirm.value = ''; err.classList.add('hidden');
+            
+            if (isCreate) {
+                confirm.classList.remove('hidden');
+            } else {
+                confirm.classList.add('hidden');
+            }
+            
+            input.value = ''; 
+            confirm.value = ''; 
+            err.classList.add('hidden');
+
+            setTimeout(() => input.focus(), 100);
 
             const submit = async () => {
                 const pass = input.value.trim();
-                if (pass.length < 6) { err.textContent = 'Минимум 6 символов'; err.classList.remove('hidden'); return; }
-                if (isCreate && pass !== confirm.value.trim()) { err.textContent = 'Пароли не совпадают'; err.classList.remove('hidden'); return; }
+                if (pass.length < 6) { 
+                    err.textContent = 'Минимум 6 символов'; 
+                    err.classList.remove('hidden'); 
+                    return; 
+                }
+                
+                if (isCreate && pass !== confirm.value.trim()) { 
+                    err.textContent = 'Пароли не совпадают'; 
+                    err.classList.remove('hidden'); 
+                    return; 
+                }
                 
                 if (!isCreate) {
-                    const test = await CryptoSystem.decryptWithMaster(localStorage.getItem('contacts_encrypted'), pass);
-                    if (test === null) { err.textContent = 'Неверный пароль'; err.classList.remove('hidden'); return; }
+                    const encrypted = localStorage.getItem('contacts_encrypted');
+                    if (encrypted) {
+                        const test = await CryptoSystem.decryptWithMaster(encrypted, pass);
+                        if (test === null) { 
+                            err.textContent = 'Неверный пароль'; 
+                            err.classList.remove('hidden'); 
+                            return; 
+                        }
+                    }
                 }
 
                 masterPassword = pass;
@@ -57,16 +83,18 @@ const UI = {
             };
 
             btn.onclick = submit;
-            input.onkeydown = e => e.key === 'Enter' && submit();
-            input.focus();
+            input.onkeydown = e => { if (e.key === 'Enter') submit(); };
+            if (isCreate) confirm.onkeydown = e => { if (e.key === 'Enter') submit(); };
         });
     },
 
     bootstrap: async () => {
         if (!localStorage.getItem('uid')) localStorage.setItem('uid', CryptoSystem.generateKey().slice(0, 16));
         currentUser = localStorage.getItem('uid');
+        
         await UI.loadSettings();
         UI.setupListeners();
+        
         document.getElementById('app').classList.remove('hidden');
         document.getElementById('main-chat').classList.add('hidden');
         document.getElementById('sidebar').classList.remove('hidden-mobile');
@@ -75,7 +103,7 @@ const UI = {
     loadSettings: async () => {
         myName = localStorage.getItem('myName') || 'Node_01';
         myAvatar = localStorage.getItem('myAvatar') || '';
-        const state = window.WebRTC.getState();
+        
         if (masterPassword) {
             contacts = await CryptoSystem.loadEncryptedContacts(masterPassword) || {};
         } else {
@@ -86,6 +114,7 @@ const UI = {
 
     renderContacts: () => {
         const list = document.getElementById('contact-list');
+        if (!list) return;
         list.innerHTML = '';
         Object.entries(contacts).forEach(([id, c]) => {
             const div = document.createElement('div');
@@ -106,9 +135,11 @@ const UI = {
         localStorage.setItem('activePeer', id);
         document.getElementById('sidebar').classList.add('hidden-mobile');
         document.getElementById('main-chat').classList.remove('hidden');
+        
         const c = contacts[id] || {};
         document.getElementById('chat-name').textContent = c.name || id.slice(0,6);
         document.getElementById('chat-avatar').innerHTML = c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>';
+        
         UI.updateStatus();
         UI.loadMessages(id);
         UI.renderContacts();
@@ -120,6 +151,7 @@ const UI = {
         const dot = document.getElementById('status-dot');
         const txt = document.getElementById('chat-status');
         const banner = document.getElementById('connection-banner');
+        
         if (isOnline) {
             dot.className = 'dot online';
             txt.textContent = 'Secure Connection';
@@ -133,7 +165,9 @@ const UI = {
 
     loadMessages: async (id) => {
         const container = document.getElementById('messages-container');
+        if (!container) return;
         container.innerHTML = '';
+        
         const history = await window.WebRTC.loadHistory(id);
         const state = window.WebRTC.getState();
         const localKey = contacts[id]?.localSessionKey;
@@ -179,18 +213,21 @@ const UI = {
             document.getElementById('new-chat-modal').classList.remove('hidden');
             UI.showStep('step-role');
         };
+        
         document.querySelectorAll('.close-modal').forEach(b => b.onclick = () => b.closest('.modal-overlay').classList.add('hidden'));
 
         document.getElementById('settings-btn').onclick = () => {
             document.getElementById('set-name').value = myName;
             document.getElementById('settings-modal').classList.remove('hidden');
         };
+        
         document.getElementById('btn-save-settings').onclick = async () => {
             myName = document.getElementById('set-name').value || 'Node_01';
             localStorage.setItem('myName', myName);
             UI.renderContacts();
             document.getElementById('settings-modal').classList.add('hidden');
         };
+        
         document.getElementById('btn-wipe').onclick = () => {
             if (confirm('Удалить все данные?')) { localStorage.clear(); location.reload(); }
         };
@@ -201,9 +238,11 @@ const UI = {
             this.style.height = (this.scrollHeight) + 'px';
             UI.toggleSendBtn();
         });
+        
         inp.addEventListener('keypress', e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.WebRTC.sendMessage(); }
         });
+        
         document.getElementById('send-btn').onclick = window.WebRTC.sendMessage;
         document.getElementById('attach-btn').onclick = () => document.getElementById('file-input').click();
         document.getElementById('file-input').onchange = e => { if(e.target.files[0]) window.WebRTC.sendImage(e.target.files[0]); e.target.value=''; };

@@ -1,594 +1,294 @@
-
-
-function $(a) { return document.getElementById(a); }
-function getEl(a) { return document.getElementById(a); }
-
-// --- EULA & INIT ---
-document.addEventListener('DOMContentLoaded', async () => {
-    // 1. Проверка EULA
-    if (!localStorage.getItem('eula_agreed')) {
-        showEULA();
-    } else {
-        initApp();
-    }
-});
-
-function showEULA() {
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.style.zIndex = '10000';
-    modal.innerHTML = `
-        <div class="modal-content">
-            <div class="modal-header"><h2>Пользовательское соглашение</h2></div>
-            <div class="modal-body">
-                <p><strong>ВНИМАНИЕ:</strong> Это E2E зашифрованный мессенджер.</p>
-                <ul>
-                    <li>Сообщения хранятся только на вашем устройстве.</li>
-                    <li>Никакой сервер не может восстановить ваши данные.</li>
-                    <li>Если вы потеряете мастер-пароль, переписка будет утеряна навсегда.</li>
-                    <li>Вы несете полную ответственность за сохранность своих ключей.</li>
-                </ul>
-            </div>
-            <div class="button-group">
-                <button class="btn-primary" id="eula-agree-btn">Я принимаю условия</button>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    
-    document.getElementById('eula-agree-btn').onclick = () => {
-        localStorage.setItem('eula_agreed', 'true');
-        modal.remove();
-        initApp();
-    };
-}
-
-async function initApp() {
-    loadTheme();
-    
-    // 2. Проверка Мастер-пароля
-    const hasEncryptedData = localStorage.getItem('contacts_encrypted') !== null;
-    
-    if (hasEncryptedData) {
-        await showMasterPasswordPrompt(false);
-    } else {
-        // Спрашиваем, хочет ли пользователь пароль
-        const wantPassword = confirm('🔐 Создать мастер-пароль для защиты данных?\n\nБез него история хранится в открытом виде.');
-        if (wantPassword) {
-            await showMasterPasswordPrompt(true);
+const UI = {
+    init: async () => {
+        UI.loadTheme();
+        if (!localStorage.getItem('eula_accepted')) {
+            document.getElementById('eula-modal').classList.remove('hidden');
+            document.getElementById('accept-eula-btn').onclick = () => {
+                localStorage.setItem('eula_accepted', 'true');
+                document.getElementById('eula-modal').classList.add('hidden');
+                UI.checkAuth();
+            };
         } else {
-            masterPassword = null; // Используем глобальную переменную из webrtc.js
+            UI.checkAuth();
         }
-    }
+    },
 
-    await loadSettings();
-    setupEventListeners();
-    
-    // UI Init
-    const mainChat = $('main-chat');
-    const sidebar = $('sidebar');
-    if (mainChat) mainChat.classList.add('hidden');
-    if (sidebar) sidebar.classList.remove('hidden');
-}
-
-function setupEventListeners() {
-    // Кнопки меню
-    const newChatBtn = $('new-chat-btn');
-    if (newChatBtn) newChatBtn.addEventListener('click', showNewChat);
-    
-    const sidebarToggle = $('sidebar-toggle');
-    if (sidebarToggle) sidebarToggle.addEventListener('click', toggleSidebar);
-    
-    // Ввод сообщения
-    const msgInput = $('message-input');
-    if (msgInput) {
-        msgInput.addEventListener('keypress', c => {
-            if (c.key === 'Enter' && !c.shiftKey) {
-                c.preventDefault();
-                sendMessage(); // Функция из webrtc.js
-            }
-        });
-    }
-
-    // Обработчики инпутов в модалках (Host/Join)
-    const hostInput = $('host-answer-input');
-    if (hostInput) {
-        hostInput.addEventListener('input', d => {
-            try {
-                parseInvitePayload(d.target.value.trim()); // Функция из webrtc.js
-                const btn = $('host-connect-btn');
-                if (btn) btn.disabled = false;
-            } catch (e) {
-                const btn = $('host-connect-btn');
-                if (btn) btn.disabled = true;
-            }
-        });
-    }
-
-    const joinInput = $('join-offer-input');
-    if (joinInput) {
-        joinInput.addEventListener('input', f => {
-            try {
-                parseInvitePayload(f.target.value.trim()); // Функция из webrtc.js
-                const btn = $('join-generate-btn');
-                if (btn) btn.disabled = false;
-            } catch (g) {
-                const btn = $('join-generate-btn');
-                if (btn) btn.disabled = true;
-            }
-        });
-    }
-
-    // Закрытие модалок по Esc
-    document.addEventListener('keydown', h => {
-        if (h.key === 'Escape') {
-            closeNewChat();
-            closeSettings();
+    checkAuth: async () => {
+        const hasData = localStorage.getItem('contacts_encrypted');
+        if (hasData) {
+            await UI.promptPassword(false);
+        } else {
+            const wantPass = confirm('Создать мастер-пароль для шифрования базы данных?');
+            if (wantPass) await UI.promptPassword(true);
         }
-    });
-}
+        UI.bootstrap();
+    },
 
-// --- MASTER PASSWORD LOGIC ---
-async function showMasterPasswordPrompt(isCreate = false) {
-    return new Promise(async (resolve) => {
-        const oldModal = document.querySelector('.master-password-modal');
-        if (oldModal) oldModal.remove();
+    promptPassword: (isCreate) => {
+        return new Promise(async (resolve) => {
+            const modal = document.getElementById('master-password-modal');
+            const title = document.getElementById('mp-title');
+            const desc = document.getElementById('mp-desc');
+            const input = document.getElementById('master-password-input');
+            const confirm = document.getElementById('master-password-confirm');
+            const btn = document.getElementById('mp-submit-btn');
+            const err = document.getElementById('mp-error');
 
-        const modal = document.createElement('div');
-        modal.className = 'master-password-modal';
-        modal.innerHTML = `
-            <div class="master-password-content">
-                <h2>${isCreate ? 'Создание пароля' : 'Вход в систему'}</h2>
-                <p>${isCreate ? 'Придумайте надежный пароль для шифрования базы.' : 'Введите пароль для расшифровки данных.'}</p>
-                <input type="password" id="mp-input" placeholder="Пароль" autocomplete="off" style="width:100%; padding:12px; margin-bottom:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text);" />
-                ${isCreate ? '<input type="password" id="mp-confirm" placeholder="Повторите пароль" autocomplete="off" style="width:100%; padding:12px; margin-bottom:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--text);" />' : ''}
-                <button class="btn-primary" id="mp-submit" style="width:100%; padding:12px;">${isCreate ? 'Создать' : 'Войти'}</button>
-                <div id="mp-error" style="color:#ef4444; font-size:0.9rem; margin-top:10px; text-align:center;"></div>
-            </div>
-        `;
-        document.body.appendChild(modal);
+            modal.classList.remove('hidden');
+            title.textContent = isCreate ? 'Создание ключа' : 'Авторизация';
+            desc.textContent = isCreate ? 'Придумайте надежный пароль.' : 'Введите пароль для доступа.';
+            btn.textContent = isCreate ? 'Создать' : 'Войти';
+            confirm.classList.toggle('hidden', !isCreate);
+            input.value = ''; confirm.value = ''; err.classList.add('hidden');
 
-        const input = document.getElementById('mp-input');
-        const confirmInput = document.getElementById('mp-confirm');
-        const submitBtn = document.getElementById('mp-submit');
-        const errorDiv = document.getElementById('mp-error');
-
-        setTimeout(() => input.focus(), 100);
-
-        const handleSubmit = async () => {
-            const pass = input.value.trim();
-            
-            if (pass.length < 6) {
-                errorDiv.textContent = 'Пароль должен быть минимум 6 символов';
-                return;
-            }
-
-            if (isCreate) {
-                if (pass !== confirmInput.value.trim()) {
-                    errorDiv.textContent = 'Пароли не совпадают';
-                    return;
+            const submit = async () => {
+                const pass = input.value.trim();
+                if (pass.length < 6) { err.textContent = 'Минимум 6 символов'; err.classList.remove('hidden'); return; }
+                if (isCreate && pass !== confirm.value.trim()) { err.textContent = 'Пароли не совпадают'; err.classList.remove('hidden'); return; }
+                
+                if (!isCreate) {
+                    const test = await CryptoSystem.decryptWithMaster(localStorage.getItem('contacts_encrypted'), pass);
+                    if (test === null) { err.textContent = 'Неверный пароль'; err.classList.remove('hidden'); return; }
                 }
-                try {
-                    const test = await CryptoSystem.encryptWithMaster('test', pass);
-                    if (!test) throw new Error('Encryption failed');
-                } catch (e) {
-                    errorDiv.textContent = 'Ошибка шифрования';
-                    return;
-                }
-            } else {
-                const encrypted = localStorage.getItem('contacts_encrypted');
-                if (encrypted) {
-                    const decrypted = await CryptoSystem.decryptWithMaster(encrypted, pass);
-                    if (decrypted === null) {
-                        errorDiv.textContent = 'Неверный пароль';
-                        return;
+
+                masterPassword = pass;
+                modal.classList.add('hidden');
+                resolve();
+            };
+
+            btn.onclick = submit;
+            input.onkeydown = e => e.key === 'Enter' && submit();
+            input.focus();
+        });
+    },
+
+    bootstrap: async () => {
+        if (!localStorage.getItem('uid')) localStorage.setItem('uid', CryptoSystem.generateKey().slice(0, 16));
+        currentUser = localStorage.getItem('uid');
+        await UI.loadSettings();
+        UI.setupListeners();
+        document.getElementById('app').classList.remove('hidden');
+        document.getElementById('main-chat').classList.add('hidden');
+        document.getElementById('sidebar').classList.remove('hidden-mobile');
+    },
+
+    loadSettings: async () => {
+        myName = localStorage.getItem('myName') || 'Node_01';
+        myAvatar = localStorage.getItem('myAvatar') || '';
+        const state = window.WebRTC.getState();
+        if (masterPassword) {
+            contacts = await CryptoSystem.loadEncryptedContacts(masterPassword) || {};
+        } else {
+            contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
+        }
+        UI.renderContacts();
+    },
+
+    renderContacts: () => {
+        const list = document.getElementById('contact-list');
+        list.innerHTML = '';
+        Object.entries(contacts).forEach(([id, c]) => {
+            const div = document.createElement('div');
+            div.className = `contact-item ${id === activePeer ? 'active' : ''}`;
+            div.innerHTML = `
+                <div class="avatar-placeholder">${c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>'}</div>
+                <div class="contact-info">
+                    <div class="contact-name">${c.name || id.slice(0,6)}</div>
+                </div>
+            `;
+            div.onclick = () => UI.openChat(id);
+            list.appendChild(div);
+        });
+    },
+
+    openChat: (id) => {
+        activePeer = id;
+        localStorage.setItem('activePeer', id);
+        document.getElementById('sidebar').classList.add('hidden-mobile');
+        document.getElementById('main-chat').classList.remove('hidden');
+        const c = contacts[id] || {};
+        document.getElementById('chat-name').textContent = c.name || id.slice(0,6);
+        document.getElementById('chat-avatar').innerHTML = c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>';
+        UI.updateStatus();
+        UI.loadMessages(id);
+        UI.renderContacts();
+    },
+
+    updateStatus: () => {
+        const state = window.WebRTC.getState();
+        const isOnline = state.dataChannel && state.dataChannel.readyState === 'open';
+        const dot = document.getElementById('status-dot');
+        const txt = document.getElementById('chat-status');
+        const banner = document.getElementById('connection-banner');
+        if (isOnline) {
+            dot.className = 'dot online';
+            txt.textContent = 'Secure Connection';
+            banner.classList.add('hidden');
+        } else {
+            dot.className = 'dot offline';
+            txt.textContent = 'Disconnected';
+            if (activePeer) banner.classList.remove('hidden');
+        }
+    },
+
+    loadMessages: async (id) => {
+        const container = document.getElementById('messages-container');
+        container.innerHTML = '';
+        const history = await window.WebRTC.loadHistory(id);
+        const state = window.WebRTC.getState();
+        const localKey = contacts[id]?.localSessionKey;
+        const remoteKey = contacts[id]?.remoteKey;
+
+        for (const msg of history) {
+            const isMine = msg.from === state.currentUser;
+            const div = document.createElement('div');
+            div.className = `message ${isMine ? 'mine' : 'other'}`;
+            let content = '🔒 Encrypted';
+            const key = isMine ? remoteKey : localKey;
+
+            if (msg.type === 'image') {
+                if (key && msg.ciphertext) {
+                    const buf = await CryptoSystem.decryptData(msg.ciphertext, key);
+                    if (buf) {
+                        const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
+                        content = `<img src="${url}" onclick="UI.openLightbox('${url}')">`;
                     }
                 }
-            }
-
-            masterPassword = pass; // Присваиваем значение глобальной переменной
-            modal.remove();
-            resolve();
-        };
-
-        submitBtn.onclick = handleSubmit;
-        input.onkeydown = (e) => { if (e.key === 'Enter') handleSubmit(); };
-        if (confirmInput) confirmInput.onkeydown = (e) => { if (e.key === 'Enter') handleSubmit(); };
-    });
-}
-
-// --- SETTINGS & DATA ---
-async function loadSettings() {
-    myName = localStorage.getItem('myName') || 'You';
-    myAvatar = localStorage.getItem('myAvatar') || '';
-    currentUser = localStorage.getItem('uid');
-    
-    if (!currentUser) {
-        currentUser = CryptoSystem.generateKey().slice(0, 16);
-        localStorage.setItem('uid', currentUser);
-    }
-
-    if (masterPassword) {
-        const enc = localStorage.getItem('contacts_encrypted');
-        if (enc) {
-            const dec = await CryptoSystem.decryptWithMaster(enc, masterPassword);
-            contacts = dec ? JSON.parse(dec) : {};
-        } else {
-            const plain = localStorage.getItem('contacts');
-            if (plain) {
-                contacts = JSON.parse(plain);
-                await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
-                localStorage.removeItem('contacts');
             } else {
-                contacts = {};
-            }
-        }
-    } else {
-        contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
-    }
-
-    renderContactList();
-    
-    const lastPeer = localStorage.getItem('activePeer');
-    if (lastPeer && contacts[lastPeer]) {
-        activePeer = lastPeer;
-        openChat(lastPeer);
-    }
-}
-
-function renderContactList() {
-    const list = getEl('contact-list');
-    if (!list) return;
-    list.innerHTML = '';
-    
-    Object.entries(contacts).forEach(([id, data]) => {
-        const div = document.createElement('div');
-        div.className = `contact-item ${id === activePeer ? 'active' : ''}`;
-        div.innerHTML = `
-            <span class="contact-avatar">${data.avatar || '👤'}</span>
-            <span class="contact-name">${data.name || id.slice(0, 8)}</span>
-            <button class="delete-btn" onclick="event.stopPropagation(); deleteChat('${id}')">✕</button>
-        `;
-        div.onclick = () => {
-            activePeer = id;
-            localStorage.setItem('activePeer', id);
-            openChat(id);
-        };
-        list.appendChild(div);
-    });
-}
-
-async function deleteChat(id) {
-    if (!confirm('Удалить чат и историю?')) return;
-    const histKey = `history_${[currentUser, id].sort().join('_')}`;
-    const pinnedKey = `pinned_${id}`;
-    
-    if (masterPassword) localStorage.removeItem(`hist_${histKey}`);
-    else localStorage.removeItem(histKey);
-    
-    localStorage.removeItem(pinnedKey);
-    localStorage.removeItem(`role_${id}`);
-    delete contacts[id];
-    
-    await saveContacts(); // Функция из webrtc.js или ui.js (ниже)
-    
-    if (activePeer === id) {
-        activePeer = null;
-        localStorage.removeItem('activePeer');
-        const main = $('main-chat');
-        const side = $('sidebar');
-        if (main) main.classList.add('hidden');
-        if (side) side.classList.remove('hidden');
-    }
-    renderContactList();
-}
-
-async function saveContacts() {
-    if (masterPassword) await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
-    else localStorage.setItem('contacts', JSON.stringify(contacts));
-}
-
-// --- CHAT LOGIC ---
-function openChat(id) {
-    if (!contacts[id]) {
-        contacts[id] = { name: id.slice(0, 8), avatar: '' };
-        saveContacts();
-        renderContactList();
-    }
-
-    if (dataChannel && dataChannel.readyState === 'open' && connectedPeerId === id) {
-        updateUIForPeer(id);
-        return;
-    }
-
-    if (contacts[id].localSessionKey) {
-        pendingLocalKey = contacts[id].localSessionKey;
-        connectedPeerId = id;
-        updateUIForPeer(id);
-        
-        setTimeout(() => {
-            if (!dataChannel || dataChannel.readyState !== 'open') {
-                const panel = $('restore-panel');
-                if (panel) panel.classList.add('visible');
-            }
-        }, 2000);
-    } else {
-        pendingLocalKey = CryptoSystem.generateKey();
-        contacts[id].localSessionKey = pendingLocalKey;
-        saveContacts();
-        connectedPeerId = id;
-        updateUIForPeer(id);
-    }
-}
-
-function updateUIForPeer(id) {
-    activePeer = id;
-    localStorage.setItem('activePeer', id);
-    
-    const main = $('main-chat');
-    const side = $('sidebar');
-    
-    if (main) {
-        main.classList.remove('hidden');
-        main.style.display = 'flex';
-    }
-    if (side && window.innerWidth <= 700) {
-        side.classList.remove('visible');
-        side.classList.add('hidden');
-    }
-
-    const data = contacts[id] || {};
-    const nameEl = $('chat-name');
-    if (nameEl) nameEl.textContent = data.name || id.slice(0, 8);
-    
-    const avatarEl = $('chat-avatar');
-    if (avatarEl) avatarEl.textContent = data.avatar || '👤';
-    
-    const statusEl = $('chat-status');
-    if (statusEl) {
-        const isOnline = dataChannel && dataChannel.readyState === 'open';
-        statusEl.textContent = isOnline ? 'online' : 'connecting...';
-    }
-
-    updateKeyDisplay();
-    loadMessages(id);
-    renderContactList();
-    
-    const restorePanel = $('restore-panel');
-    if (restorePanel && dataChannel && dataChannel.readyState === 'open') {
-        restorePanel.classList.remove('visible');
-    }
-}
-
-async function loadMessages(id) {
-    const container = $('messages');
-    if (!container) return;
-    
-    const history = await loadMessageHistory(id); // Функция из webrtc.js
-    container.innerHTML = '';
-    
-    const localKey = contacts[id]?.localSessionKey;
-    const remoteKey = contacts[id]?.remoteKey;
-
-    for (const msg of history) {
-        const isMine = msg.from === currentUser;
-        let content = '';
-        
-        if (msg.type === 'image') {
-            const key = isMine ? remoteKey : localKey;
-            if (key && msg.ciphertext) {
-                try {
-                    const buffer = await CryptoSystem.decryptData(msg.ciphertext, key);
-                    if (buffer) {
-                        const blob = new Blob([buffer], { type: msg.mimeType || 'image/jpeg' });
-                        const url = URL.createObjectURL(blob);
-                        content = `<img src="${url}" class="chat-image" onclick="openLightbox('${url}')" />`;
-                    } else {
-                        content = '🔒 Encrypted image';
-                    }
-                } catch (e) {
-                    content = '🔒 Encrypted image';
+                if (key && msg.ciphertext) {
+                    const txt = await CryptoSystem.decrypt(msg.ciphertext, key);
+                    if (txt) content = txt;
                 }
-            } else {
-                content = '🔒 Encrypted image';
             }
-        } else {
-            const key = isMine ? remoteKey : localKey;
-            if (key && msg.ciphertext) {
-                const text = await CryptoSystem.decrypt(msg.ciphertext, key);
-                content = text !== null ? text : '🔒 Encrypted';
-            } else {
-                content = '🔒 Encrypted';
-            }
+            div.innerHTML = `<div>${content}</div><span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
+            container.appendChild(div);
         }
+        container.scrollTop = container.scrollHeight;
+    },
 
-        const div = document.createElement('div');
-        div.className = `message ${isMine ? 'my-message' : 'other-message'}`;
-        div.innerHTML = `
-            <div class="message-content">${content}</div>
-            <div class="message-time">${new Date(msg.timestamp).toLocaleTimeString()}</div>
-        `;
-        container.appendChild(div);
-    }
-    
-    setTimeout(() => { container.scrollTop = container.scrollHeight; }, 100);
-}
+    setupListeners: () => {
+        document.getElementById('theme-toggle-btn').onclick = () => {
+            document.body.classList.toggle('light');
+            const isLight = document.body.classList.contains('light');
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+            document.querySelector('.theme-icon-dark').classList.toggle('hidden', isLight);
+            document.querySelector('.theme-icon-light').classList.toggle('hidden', !isLight);
+        };
 
-function updateOnlineStatus() {
-    const statusEl = $('chat-status');
-    if (statusEl && activePeer) {
-        const isOnline = dataChannel && dataChannel.readyState === 'open';
-        statusEl.textContent = isOnline ? 'online' : 'offline';
-    }
-    
-    const restorePanel = $('restore-panel');
-    if (restorePanel && activePeer) {
-        if (dataChannel && dataChannel.readyState === 'open') {
-            restorePanel.classList.remove('visible');
+        document.getElementById('new-chat-btn').onclick = () => {
+            document.getElementById('new-chat-modal').classList.remove('hidden');
+            UI.showStep('step-role');
+        };
+        document.querySelectorAll('.close-modal').forEach(b => b.onclick = () => b.closest('.modal-overlay').classList.add('hidden'));
+
+        document.getElementById('settings-btn').onclick = () => {
+            document.getElementById('set-name').value = myName;
+            document.getElementById('settings-modal').classList.remove('hidden');
+        };
+        document.getElementById('btn-save-settings').onclick = async () => {
+            myName = document.getElementById('set-name').value || 'Node_01';
+            localStorage.setItem('myName', myName);
+            UI.renderContacts();
+            document.getElementById('settings-modal').classList.add('hidden');
+        };
+        document.getElementById('btn-wipe').onclick = () => {
+            if (confirm('Удалить все данные?')) { localStorage.clear(); location.reload(); }
+        };
+
+        const inp = document.getElementById('message-input');
+        inp.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            UI.toggleSendBtn();
+        });
+        inp.addEventListener('keypress', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.WebRTC.sendMessage(); }
+        });
+        document.getElementById('send-btn').onclick = window.WebRTC.sendMessage;
+        document.getElementById('attach-btn').onclick = () => document.getElementById('file-input').click();
+        document.getElementById('file-input').onchange = e => { if(e.target.files[0]) window.WebRTC.sendImage(e.target.files[0]); e.target.value=''; };
+
+        document.getElementById('back-btn').onclick = () => {
+            document.getElementById('sidebar').classList.remove('hidden-mobile');
+            document.getElementById('main-chat').classList.add('hidden');
+        };
+
+        document.getElementById('btn-host-copy').onclick = () => { navigator.clipboard.writeText(window.currentPayload); alert('Copied'); };
+        document.getElementById('guest-offer-input').addEventListener('input', window.WebRTC.processGuestInput);
+        document.getElementById('btn-guest-generate').onclick = window.WebRTC.generateAnswer;
+        document.getElementById('btn-guest-copy').onclick = () => { navigator.clipboard.writeText(window.guestPayload); alert('Copied'); };
+
+        UI.setupPaste('host-paste-zone', 'host-answer-input');
+        UI.setupPaste('guest-paste-zone', 'guest-offer-input');
+    },
+
+    toggleSendBtn: () => {
+        const btn = document.getElementById('send-btn');
+        const inp = document.getElementById('message-input');
+        btn.disabled = inp.value.trim().length === 0;
+    },
+
+    setupPaste: (zoneId, inputId) => {
+        const zone = document.getElementById(zoneId);
+        const input = document.getElementById(inputId);
+        zone.onclick = () => input.focus();
+        zone.addEventListener('paste', (e) => {
+            setTimeout(() => {
+                input.dispatchEvent(new Event('input'));
+            }, 100);
+        });
+    },
+
+    showStep: (id) => {
+        document.querySelectorAll('.step-view').forEach(el => el.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    },
+
+    selectRole: (role) => {
+        if (role === 'host') window.WebRTC.startHost();
+        else window.WebRTC.startGuest();
+    },
+
+    goBack: () => UI.showStep('step-role'),
+
+    setVoiceCode: (type, code) => {
+        document.getElementById(`${type}-voice-code`).textContent = code;
+    },
+
+    showLoader: (type) => {
+        document.getElementById(`${type}-loader`).classList.remove('hidden');
+    },
+
+    hideLoaders: () => {
+        document.querySelectorAll('.loader-container').forEach(el => el.classList.add('hidden'));
+    },
+
+    resetGuest: () => {
+        document.getElementById('guest-result').classList.add('hidden');
+        document.getElementById('btn-guest-generate').disabled = true;
+        document.getElementById('guest-offer-input').value = '';
+    },
+
+    showGuestResult: (code, payload) => {
+        window.guestPayload = payload;
+        UI.setVoiceCode('guest', code);
+        document.getElementById('guest-result').classList.remove('hidden');
+    },
+
+    openLightbox: (src) => {
+        const lb = document.getElementById('lightbox');
+        document.getElementById('lb-img').src = src;
+        lb.classList.remove('hidden');
+        lb.onclick = (e) => { if(e.target === lb || e.target.closest('.lb-close')) lb.classList.add('hidden'); };
+    },
+
+    loadTheme: () => {
+        if (localStorage.getItem('theme') === 'light') {
+            document.body.classList.add('light');
+            document.querySelector('.theme-icon-dark').classList.add('hidden');
+            document.querySelector('.theme-icon-light').classList.remove('hidden');
         }
     }
-}
+};
 
-function updateKeyDisplay() {
-    if (!activePeer) return;
-    const myKeyEl = $('my-key-display');
-    const partnerKeyEl = $('partner-key-display');
-    
-    const localKey = contacts[activePeer]?.localSessionKey;
-    const remoteKey = contacts[activePeer]?.remoteKey;
-    
-    if (myKeyEl) myKeyEl.innerText = localKey ? localKey.slice(0, 8) + '...' : 'none';
-    if (partnerKeyEl) partnerKeyEl.innerText = remoteKey ? remoteKey.slice(0, 8) + '...' : '(waiting...)';
-}
-
-// --- UTILS ---
-function toggleTheme() {
-    const checkbox = $('theme-toggle');
-    if (checkbox) {
-        document.body.classList.toggle('light', !checkbox.checked);
-        localStorage.setItem('theme', checkbox.checked ? 'dark' : 'light');
-    }
-}
-
-function loadTheme() {
-    const saved = localStorage.getItem('theme');
-    const checkbox = $('theme-toggle');
-    if (saved === 'light') {
-        document.body.classList.add('light');
-        if (checkbox) checkbox.checked = false;
-    } else {
-        document.body.classList.remove('light');
-        if (checkbox) checkbox.checked = true;
-    }
-}
-
-function toggleSidebar() {
-    const side = $('sidebar');
-    const main = $('main-chat');
-    if (side) side.classList.toggle('visible');
-    if (main) main.classList.toggle('shifted');
-}
-
-function showNewChat() {
-    resetToRoleSelect();
-    const modal = $('new-chat-modal');
-    if (modal) modal.classList.remove('hidden');
-}
-
-function closeNewChat() {
-    const modal = $('new-chat-modal');
-    if (modal) modal.classList.add('hidden');
-}
-
-function resetToRoleSelect() {
-    showSection('role-select-section');
-    document.querySelectorAll('.step-content').forEach(el => el.classList.remove('visible'));
-}
-
-function showSection(id) {
-    ['role-select-section', 'host-flow', 'join-flow'].forEach(secId => {
-        const el = getEl(secId);
-        if (el) el.classList.add('hidden');
-    });
-    const target = getEl(id);
-    if (target) target.classList.remove('hidden');
-    document.querySelectorAll('.step-content').forEach(el => el.classList.remove('visible'));
-}
-
-function showSettings() {
-    const modal = $('settings-modal');
-    if (modal) modal.classList.remove('hidden');
-}
-
-function closeSettings() {
-    const modal = $('settings-modal');
-    if (modal) modal.classList.add('hidden');
-}
-
-async function saveSettings() {
-    const nameInput = $('name-input');
-    const avatarInput = $('avatar-input');
-    
-    myName = nameInput ? nameInput.value.trim() || 'You' : 'You';
-    myAvatar = avatarInput ? avatarInput.value.trim() || '' : '';
-    
-    localStorage.setItem('myName', myName);
-    localStorage.setItem('myAvatar', myAvatar);
-    
-    closeSettings();
-    renderContactList();
-}
-
-async function deleteAllChats() {
-    const count = Object.keys(contacts).length;
-    if (count === 0) { alert('Нет чатов для удаления.'); return; }
-    
-    if (!confirm(`⚠️ Удалить ВСЕ чаты (${count})?\nЭто действие необратимо!`)) return;
-    
-    if (dataChannel) { dataChannel.close(); dataChannel = null; }
-    if (peerConnection) { peerConnection.close(); peerConnection = null; }
-    if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
-    
-    for (let id of Object.keys(contacts)) {
-        const histKey = `history_${[currentUser, id].sort().join('_')}`;
-        if (masterPassword) localStorage.removeItem(`hist_${histKey}`);
-        else localStorage.removeItem(histKey);
-        localStorage.removeItem(`pinned_${id}`);
-        localStorage.removeItem(`role_${id}`);
-    }
-    
-    contacts = {};
-    await saveContacts();
-    
-    activePeer = null;
-    connectedPeerId = null;
-    verifiedFingerprints = {};
-    localStorage.removeItem('activePeer');
-    
-    renderContactList();
-    
-    const main = $('main-chat');
-    const side = $('sidebar');
-    if (main) main.classList.add('hidden');
-    if (side) {
-        side.classList.remove('hidden');
-        if (window.innerWidth <= 700) side.classList.add('visible');
-    }
-    
-    const msgs = $('messages');
-    if (msgs) msgs.innerHTML = `<div class="empty-state"><div class="empty-icon">💬</div><p>Выберите или создайте чат</p></div>`;
-    
-    closeSettings();
-    alert('Все чаты удалены.');
-}
-
-function openLightbox(src) {
-    const existing = document.querySelector('.lightbox-overlay');
-    if (existing) existing.remove();
-    
-    const overlay = document.createElement('div');
-    overlay.className = 'lightbox-overlay';
-    
-    const img = document.createElement('img');
-    img.src = src;
-    img.className = 'lightbox-image';
-    
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'lightbox-close';
-    closeBtn.innerHTML = '✕';
-    
-    overlay.appendChild(img);
-    overlay.appendChild(closeBtn);
-    document.body.appendChild(overlay);
-    
-    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-    closeBtn.onclick = () => overlay.remove();
-    
-    const escHandler = (e) => {
-        if (e.key === 'Escape') {
-            overlay.remove();
-            document.removeEventListener('keydown', escHandler);
-        }
-    };
-    document.addEventListener('keydown', escHandler);
-}
+document.addEventListener('DOMContentLoaded', UI.init);

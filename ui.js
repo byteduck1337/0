@@ -1,8 +1,4 @@
-// Глобальные переменные
-let currentUser, myName = 'You', myAvatar = '', contacts = {}, activePeer = null;
-let peerConnection = null, dataChannel = null, pendingLocalKey = null;
-let keySendInterval = null, connectedPeerId = null, masterPassword = null;
-let verifiedFingerprints = {};
+
 
 function $(a) { return document.getElementById(a); }
 function getEl(a) { return document.getElementById(a); }
@@ -61,7 +57,7 @@ async function initApp() {
         if (wantPassword) {
             await showMasterPasswordPrompt(true);
         } else {
-            masterPassword = null;
+            masterPassword = null; // Используем глобальную переменную из webrtc.js
         }
     }
 
@@ -89,7 +85,7 @@ function setupEventListeners() {
         msgInput.addEventListener('keypress', c => {
             if (c.key === 'Enter' && !c.shiftKey) {
                 c.preventDefault();
-                sendMessage();
+                sendMessage(); // Функция из webrtc.js
             }
         });
     }
@@ -99,7 +95,7 @@ function setupEventListeners() {
     if (hostInput) {
         hostInput.addEventListener('input', d => {
             try {
-                parseInvitePayload(d.target.value.trim());
+                parseInvitePayload(d.target.value.trim()); // Функция из webrtc.js
                 const btn = $('host-connect-btn');
                 if (btn) btn.disabled = false;
             } catch (e) {
@@ -113,7 +109,7 @@ function setupEventListeners() {
     if (joinInput) {
         joinInput.addEventListener('input', f => {
             try {
-                parseInvitePayload(f.target.value.trim());
+                parseInvitePayload(f.target.value.trim()); // Функция из webrtc.js
                 const btn = $('join-generate-btn');
                 if (btn) btn.disabled = false;
             } catch (g) {
@@ -132,10 +128,9 @@ function setupEventListeners() {
     });
 }
 
-// --- MASTER PASSWORD LOGIC (FIXED) ---
+// --- MASTER PASSWORD LOGIC ---
 async function showMasterPasswordPrompt(isCreate = false) {
     return new Promise(async (resolve) => {
-        // Удаляем старые модалки если есть
         const oldModal = document.querySelector('.master-password-modal');
         if (oldModal) oldModal.remove();
 
@@ -158,7 +153,6 @@ async function showMasterPasswordPrompt(isCreate = false) {
         const submitBtn = document.getElementById('mp-submit');
         const errorDiv = document.getElementById('mp-error');
 
-        // Фокус на поле ввода
         setTimeout(() => input.focus(), 100);
 
         const handleSubmit = async () => {
@@ -174,7 +168,6 @@ async function showMasterPasswordPrompt(isCreate = false) {
                     errorDiv.textContent = 'Пароли не совпадают';
                     return;
                 }
-                // Тест шифрования
                 try {
                     const test = await CryptoSystem.encryptWithMaster('test', pass);
                     if (!test) throw new Error('Encryption failed');
@@ -183,7 +176,6 @@ async function showMasterPasswordPrompt(isCreate = false) {
                     return;
                 }
             } else {
-                // Проверка существующего пароля
                 const encrypted = localStorage.getItem('contacts_encrypted');
                 if (encrypted) {
                     const decrypted = await CryptoSystem.decryptWithMaster(encrypted, pass);
@@ -194,7 +186,7 @@ async function showMasterPasswordPrompt(isCreate = false) {
                 }
             }
 
-            masterPassword = pass;
+            masterPassword = pass; // Присваиваем значение глобальной переменной
             modal.remove();
             resolve();
         };
@@ -216,14 +208,12 @@ async function loadSettings() {
         localStorage.setItem('uid', currentUser);
     }
 
-    // Загрузка контактов
     if (masterPassword) {
         const enc = localStorage.getItem('contacts_encrypted');
         if (enc) {
             const dec = await CryptoSystem.decryptWithMaster(enc, masterPassword);
             contacts = dec ? JSON.parse(dec) : {};
         } else {
-            // Миграция старых данных
             const plain = localStorage.getItem('contacts');
             if (plain) {
                 contacts = JSON.parse(plain);
@@ -239,7 +229,6 @@ async function loadSettings() {
 
     renderContactList();
     
-    // Восстановление последнего чата
     const lastPeer = localStorage.getItem('activePeer');
     if (lastPeer && contacts[lastPeer]) {
         activePeer = lastPeer;
@@ -281,7 +270,7 @@ async function deleteChat(id) {
     localStorage.removeItem(`role_${id}`);
     delete contacts[id];
     
-    await saveContacts();
+    await saveContacts(); // Функция из webrtc.js или ui.js (ниже)
     
     if (activePeer === id) {
         activePeer = null;
@@ -307,20 +296,16 @@ function openChat(id) {
         renderContactList();
     }
 
-    // Если уже подключены к этому пиру
     if (dataChannel && dataChannel.readyState === 'open' && connectedPeerId === id) {
         updateUIForPeer(id);
         return;
     }
 
-    // Попытка восстановления сессии
     if (contacts[id].localSessionKey) {
         pendingLocalKey = contacts[id].localSessionKey;
         connectedPeerId = id;
-        // Здесь должна быть логика переподключения, но пока просто обновляем UI
         updateUIForPeer(id);
         
-        // Таймаут для проверки соединения
         setTimeout(() => {
             if (!dataChannel || dataChannel.readyState !== 'open') {
                 const panel = $('restore-panel');
@@ -379,7 +364,7 @@ async function loadMessages(id) {
     const container = $('messages');
     if (!container) return;
     
-    const history = await loadMessageHistory(id);
+    const history = await loadMessageHistory(id); // Функция из webrtc.js
     container.innerHTML = '';
     
     const localKey = contacts[id]?.localSessionKey;
@@ -540,7 +525,6 @@ async function deleteAllChats() {
     
     if (!confirm(`⚠️ Удалить ВСЕ чаты (${count})?\nЭто действие необратимо!`)) return;
     
-    // Очистка
     if (dataChannel) { dataChannel.close(); dataChannel = null; }
     if (peerConnection) { peerConnection.close(); peerConnection = null; }
     if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }

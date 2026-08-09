@@ -1,152 +1,101 @@
-﻿class CryptoSystem {
+class CryptoSystem {
     static generateKey() {
-        const array = new Uint8Array(32);
-        crypto.getRandomValues(array);
-        return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+        let a = new Uint8Array(32);
+        crypto.getRandomValues(a);
+        return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
     }
-
     static generateNonce() {
-        const array = new Uint8Array(12);
-        crypto.getRandomValues(array);
-        return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join('');
+        let a = new Uint8Array(12);
+        crypto.getRandomValues(a);
+        return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
     }
-
-    static hexToBytes(hex) {
-        const bytes = new Uint8Array(hex.length / 2);
-        for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-        return bytes;
+    static hexToBytes(a) {
+        let b = new Uint8Array(a.length / 2);
+        for (let c = 0; c < b.length; c++) b[c] = parseInt(a.substr(c * 2, 2), 16);
+        return b;
     }
-
-    static bytesToHex(bytes) {
-        return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+    static bytesToHex(a) {
+        return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
     }
-
-    static async sha256(message) {
-        const msgBuffer = new TextEncoder().encode(message);
-        const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
-        return this.bytesToHex(new Uint8Array(hashBuffer));
+    static async importKey(a) {
+        let b = this.hexToBytes(a);
+        return crypto.subtle.importKey('raw', b, 'AES-GCM', false, ['encrypt', 'decrypt']);
     }
-
-    static async importKey(hexKey) {
-        const keyBuffer = this.hexToBytes(hexKey);
-        return crypto.subtle.importKey('raw', keyBuffer, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    static async deriveMasterKey(a, b) {
+        let c = new TextEncoder().encode(a), d = await crypto.subtle.importKey('raw', c, 'PBKDF2', false, ['deriveKey']);
+        return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b, iterations: 100000, hash: 'SHA-256' }, d, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
     }
-
-    static async deriveMasterKey(password, salt) {
-        const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']);
-        return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt, iterations: 100000, hash: 'SHA-256' }, keyMaterial, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-    }
-
     static getMasterSalt() {
-        let saltHex = localStorage.getItem('master_salt');
-        if (!saltHex) {
-            const salt = crypto.getRandomValues(new Uint8Array(16));
-            saltHex = this.bytesToHex(salt);
-            localStorage.setItem('master_salt', saltHex);
+        let a = localStorage.getItem('master_salt');
+        if (!a) {
+            let b = crypto.getRandomValues(new Uint8Array(16));
+            a = this.bytesToHex(b);
+            localStorage.setItem('master_salt', a);
         }
-        return this.hexToBytes(saltHex);
+        return this.hexToBytes(a);
     }
-
-    static async encryptWithMaster(data, password) {
-        const salt = this.getMasterSalt();
-        const key = await this.deriveMasterKey(password, salt);
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(data));
-        const combined = new Uint8Array(iv.length + encrypted.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(encrypted), iv.length);
-        return btoa(String.fromCharCode(...combined));
+    static async encryptWithMaster(a, b) {
+        let c = this.getMasterSalt(), d = await this.deriveMasterKey(b, c), e = crypto.getRandomValues(new Uint8Array(12)), f = new TextEncoder().encode(a), g = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: e }, d, f), h = new Uint8Array(e.length + g.byteLength);
+        h.set(e);
+        h.set(new Uint8Array(g), e.length);
+        return btoa(String.fromCharCode(...h));
     }
-
-    static async decryptWithMaster(encryptedBase64, password) {
+    static async decryptWithMaster(a, b) {
         try {
-            const salt = this.getMasterSalt();
-            const key = await this.deriveMasterKey(password, salt);
-            const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
-            const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: combined.slice(0, 12) }, key, combined.slice(12));
-            return new TextDecoder().decode(decrypted);
-        } catch (e) { return null; }
+            let c = this.getMasterSalt(), d = await this.deriveMasterKey(b, c), e = Uint8Array.from(atob(a), f => f.charCodeAt(0)), g = e.slice(0, 12), h = e.slice(12), i = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: g }, d, h);
+            return new TextDecoder().decode(i);
+        } catch (j) { return null; }
     }
-
-    static async saveEncryptedContacts(contacts, password) {
-        const encrypted = await this.encryptWithMaster(JSON.stringify(contacts), password);
-        localStorage.setItem('contacts_encrypted', encrypted);
+    static async saveEncryptedContacts(a, b) {
+        let c = JSON.stringify(a), d = await this.encryptWithMaster(c, b);
+        localStorage.setItem('contacts_encrypted', d);
     }
-
-    static async loadEncryptedContacts(password) {
-        const encrypted = localStorage.getItem('contacts_encrypted');
-        if (!encrypted) return {};
-        const json = await this.decryptWithMaster(encrypted, password);
-        return json ? JSON.parse(json) : null;
+    static async loadEncryptedContacts(a) {
+        let b = localStorage.getItem('contacts_encrypted');
+        if (!b) return {};
+        let c = await this.decryptWithMaster(b, a);
+        return c ? JSON.parse(c) : null;
     }
-
-    static async saveEncryptedHistory(key, history, password) {
-        const encrypted = await this.encryptWithMaster(JSON.stringify(history), password);
-        localStorage.setItem(`hist_${key}`, encrypted);
+    static async saveEncryptedHistory(a, b, c) {
+        let d = `hist_${a}`, e = JSON.stringify(b), f = await this.encryptWithMaster(e, c);
+        localStorage.setItem(d, f);
     }
-
-    static async loadEncryptedHistory(key, password) {
-        const encrypted = localStorage.getItem(`hist_${key}`);
-        if (!encrypted) return [];
-        const json = await this.decryptWithMaster(encrypted, password);
-        return json ? JSON.parse(json) : [];
+    static async loadEncryptedHistory(a, b) {
+        let c = `hist_${a}`, d = localStorage.getItem(c);
+        if (!d) return [];
+        let e = await this.decryptWithMaster(d, b);
+        return e ? JSON.parse(e) : [];
     }
-
-    static async encrypt(text, hexKey) {
-        const key = await this.importKey(hexKey);
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(text));
-        const combined = new Uint8Array(iv.length + encrypted.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(encrypted), iv.length);
-        return btoa(String.fromCharCode(...combined));
+    static async encrypt(a, b) {
+        let c = await this.importKey(b), d = crypto.getRandomValues(new Uint8Array(12)), e = new TextEncoder().encode(a), f = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: d }, c, e), g = new Uint8Array(d.length + f.byteLength);
+        g.set(d);
+        g.set(new Uint8Array(f), d.length);
+        return btoa(String.fromCharCode(...g));
     }
-
-    static async decrypt(encryptedBase64, hexKey) {
+    static async decrypt(a, b) {
         try {
-            const key = await this.importKey(hexKey);
-            const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
-            const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: combined.slice(0, 12) }, key, combined.slice(12));
-            return new TextDecoder().decode(decrypted);
-        } catch (e) { return null; }
+            let c = await this.importKey(b), d = Uint8Array.from(atob(a), e => e.charCodeAt(0)), f = d.slice(0, 12), g = d.slice(12), h = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: f }, c, g);
+            return new TextDecoder().decode(h);
+        } catch (i) { return null; }
     }
-
-    static async encryptData(buffer, hexKey) {
-        const key = await this.importKey(hexKey);
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, buffer);
-        const combined = new Uint8Array(iv.length + encrypted.byteLength);
-        combined.set(iv);
-        combined.set(new Uint8Array(encrypted), iv.length);
-        return btoa(String.fromCharCode(...combined));
+    static async encryptData(a, b) {
+        let c = await this.importKey(b), d = crypto.getRandomValues(new Uint8Array(12)), e = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: d }, c, a), f = new Uint8Array(d.length + e.byteLength);
+        f.set(d);
+        f.set(new Uint8Array(e), d.length);
+        return btoa(String.fromCharCode(...f));
     }
-
-    static async decryptData(encryptedBase64, hexKey) {
+    static async decryptData(a, b) {
         try {
-            const key = await this.importKey(hexKey);
-            const combined = Uint8Array.from(atob(encryptedBase64), c => c.charCodeAt(0));
-            return await crypto.subtle.decrypt({ name: 'AES-GCM', iv: combined.slice(0, 12) }, key, combined.slice(12));
-        } catch (e) { return null; }
+            let c = await this.importKey(b), d = Uint8Array.from(atob(a), e => e.charCodeAt(0)), f = d.slice(0, 12), g = d.slice(12), h = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: f }, c, g);
+            return h;
+        } catch (i) { return null; }
     }
-
-    static extractFingerprint(sdp) {
-        const match = sdp.match(/a=fingerprint:(sha-\d+) (\S+)/);
-        return match ? match[2].replace(/:/g, '').toLowerCase() : null;
+    static async sha256(a) {
+        let b = new TextEncoder().encode(a), c = await crypto.subtle.digest('SHA-256', b);
+        return this.bytesToHex(new Uint8Array(c));
     }
-
-    // Генерация голосового кода (Alpha-Tango-Blue-12-98)
-    static async generateVoiceCode(seed) {
-        const hash = await this.sha256(seed);
-        const bytes = this.hexToBytes(hash.slice(0, 8));
-        
-        const words = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 
-                       'Red', 'Blue', 'Green', 'Yellow', 'Black', 'White', 'Zero', 'One'];
-        
-        const w1 = words[bytes[0] % 8];
-        const w2 = words[8 + (bytes[1] % 6)];
-        const n1 = bytes[2] % 100;
-        const n2 = bytes[3] % 100;
-        
-        return `${w1}-${w2}-${n1.toString().padStart(2,'0')}-${n2.toString().padStart(2,'0')}`;
+    static extractFingerprint(a) {
+        let b = a.match(/a=fingerprint:(sha-\d+) (\S+)/);
+        return b ? b[2].replace(/:/g, '').toLowerCase() : null;
     }
 }

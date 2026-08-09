@@ -1,4 +1,3 @@
-const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 const USE_SIGNAL_SERVER = true;
 
 let currentUser, myName = 'Node_01', myAvatar = '', contacts = {}, activePeer = null;
@@ -16,24 +15,26 @@ const Signal = {
         await fetch(`${SIGNALING_URL}/signal`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ roomId, type, payload: data })
+            body: JSON.stringify({ roomId, type, data })
         });
     },
     async receive(roomId, type) {
         if (!USE_SIGNAL_SERVER) {
-            const data = localStorage.getItem(`sig_${roomId}_${type}`);
-            return data ? JSON.parse(data) : null;
+            const raw = localStorage.getItem(`sig_${roomId}_${type}`);
+            return raw ? JSON.parse(raw) : null;
         }
-        const res = await fetch(`${SIGNALING_URL}/sig/${roomId}/${type}`);
+        const res = await fetch(`${SIGNALING_URL}/signal?roomId=${roomId}&type=${type}`);
         if (res.status === 404) return null;
         return await res.json();
     },
     async createRoom() {
         if (!USE_SIGNAL_SERVER) return CryptoSystem.generateKey().slice(0, 6).toUpperCase();
-        const res = await fetch(`${SIGNALING_URL}/create`, { method: 'POST' });
+        const res = await fetch(`${SIGNALING_URL}/generate-room`, { method: 'POST' });
         return (await res.json()).roomId;
     }
 };
+
+const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
 function setupPeerConnection(peerId, isHost) {
     if (peerConnection) peerConnection.close();
@@ -129,11 +130,9 @@ async function startHost() {
         const offer = await peerConnection.createOffer();
         await peerConnection.setLocalDescription(offer);
         await waitForIce();
-        const payload = JSON.stringify({ roomId: currentRoomId, sdp: peerConnection.localDescription.sdp, type: 'offer' });
         await Signal.send(currentRoomId, 'offer', peerConnection.localDescription);
         const voiceCode = await CryptoSystem.generateVoiceCode(currentRoomId);
         UI.setVoiceCode('host', voiceCode);
-        window.currentPayload = payload;
         const poll = async () => {
             if (connectedPeerId !== currentRoomId) return;
             const ans = await Signal.receive(currentRoomId, 'answer');

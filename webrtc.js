@@ -6,6 +6,8 @@ let keySendInterval = null, connectedPeerId = null, masterPassword = null;
 let verifiedFingerprints = {};
 let currentRoomId = null;
 
+const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev/';
+
 const Signal = {
     async send(roomId, type, data) {
         if (!USE_SIGNAL_SERVER) {
@@ -18,23 +20,32 @@ const Signal = {
             body: JSON.stringify({ roomId, type, data })
         });
     },
+
     async receive(roomId, type) {
         if (!USE_SIGNAL_SERVER) {
             const raw = localStorage.getItem(`sig_${roomId}_${type}`);
             return raw ? JSON.parse(raw) : null;
         }
-        const res = await fetch(`${SIGNALING_URL}/signal?roomId=${roomId}&type=${type}`);
-        if (res.status === 404) return null;
-        return await res.json();
+        try {
+            const res = await fetch(`${SIGNALING_URL}/signal?roomId=${roomId}&type=${type}`);
+            if (!res.ok) return null;
+            const text = await res.text();
+            try {
+                return JSON.parse(text);
+            } catch {
+                return null;
+            }
+        } catch {
+            return null;
+        }
     },
+
     async createRoom() {
         if (!USE_SIGNAL_SERVER) return CryptoSystem.generateKey().slice(0, 6).toUpperCase();
         const res = await fetch(`${SIGNALING_URL}/generate-room`, { method: 'POST' });
         return (await res.json()).roomId;
     }
 };
-
-const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
 function setupPeerConnection(peerId, isHost) {
     if (peerConnection) peerConnection.close();

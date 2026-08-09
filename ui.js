@@ -1,249 +1,347 @@
-﻿// ui.js — интерфейс: мастер-пароль, контакты, сообщения, настройки, код-комнаты.
-function $(id) { const el = document.getElementById(id); if (!el) console.warn(`Нет #${id}`); return el; }
-function getEl(id) { return document.getElementById(id); }
-
-// ==================== Мастер-пароль ====================
-async function showMasterPasswordPrompt(isFirstTime = false) {
-  return new Promise((resolve) => {
-    const old = document.querySelector('.master-password-modal'); if (old) old.remove();
-    const modal = document.createElement('div');
-    modal.className = 'master-password-modal';
-    modal.innerHTML = `<div class="master-password-content">
-      <h2>🔐 ${isFirstTime ? 'Создайте мастер-пароль' : 'Введите мастер-пароль'}</h2>
-      <p>${isFirstTime ? 'Защитит ключи и историю чатов. Не потеряйте его!' : 'Нужен для расшифровки данных.'}</p>
-      <input type="password" id="master-password-input" placeholder="Мастер-пароль" autocomplete="off"/>
-      ${isFirstTime ? '<input type="password" id="master-password-confirm" placeholder="Подтвердите пароль" autocomplete="off"/>' : ''}
-      <button class="btn-primary" id="master-password-submit">${isFirstTime ? 'Создать' : 'Войти'}</button>
-      <div class="master-error" id="master-error"></div></div>`;
-    document.body.appendChild(modal);
-    const submitBtn = document.getElementById('master-password-submit');
-    const errorEl = document.getElementById('master-error');
-    const passwordInput = document.getElementById('master-password-input');
-    submitBtn.onclick = async () => {
-      const password = passwordInput.value.trim();
-      if (!password || password.length < 6) { errorEl.textContent = 'Пароль должен быть не менее 6 символов'; return; }
-      if (isFirstTime && password !== document.getElementById('master-password-confirm').value.trim()) { errorEl.textContent = 'Пароли не совпадают'; return; }
-      try {
-        if (!isFirstTime) {
-          const encrypted = localStorage.getItem('contacts_encrypted');
-          if (encrypted && (await CryptoSystem.decryptWithMaster(encrypted, password)) === null) { errorEl.textContent = 'Неверный пароль'; return; }
-          if (!encrypted) {
-            const oldContacts = localStorage.getItem('contacts');
-            if (oldContacts) { localStorage.setItem('contacts_encrypted', await CryptoSystem.encryptWithMaster(oldContacts, password)); localStorage.removeItem('contacts'); }
-          }
+﻿const UI = {
+    init: async () => {
+        UI.loadTheme();
+        
+        // EULA Check
+        if (!localStorage.getItem('eula_accepted')) {
+            document.getElementById('eula-modal').classList.remove('hidden');
+            document.getElementById('accept-eula-btn').onclick = () => {
+                localStorage.setItem('eula_accepted', 'true');
+                document.getElementById('eula-modal').classList.add('hidden');
+                UI.checkAuth();
+            };
         } else {
-          const test = await CryptoSystem.encryptWithMaster('test', password);
-          if (!test) { errorEl.textContent = 'Ошибка создания ключа'; return; }
+            UI.checkAuth();
         }
-        masterPassword = password; modal.remove(); resolve();
-      } catch (e) { errorEl.textContent = 'Ошибка: ' + e.message; }
-    };
-    passwordInput.onkeydown = e => { if (e.key === 'Enter') submitBtn.click(); };
-    passwordInput.focus();
-  });
-}
+    },
 
-// ==================== Настройки и контакты ====================
-async function loadSettings() {
-  myName = localStorage.getItem('myName') || 'Вы';
-  myAvatar = localStorage.getItem('myAvatar') || '';
-  currentUser = localStorage.getItem('uid');
-  if (!currentUser) { currentUser = CryptoSystem.generateKey().slice(0, 16); localStorage.setItem('uid', currentUser); }
-  const n = getEl('name-input'); if (n) n.value = myName;
-  const a = getEl('avatar-input'); if (a) a.value = myAvatar;
-  if (masterPassword) {
-    const encrypted = localStorage.getItem('contacts_encrypted');
-    if (encrypted) { const json = await CryptoSystem.decryptWithMaster(encrypted, masterPassword); contacts = json ? JSON.parse(json) : {}; }
-    else contacts = {};
-  } else contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
-  renderContactList();
-  const saved = localStorage.getItem('activePeer');
-  if (saved && contacts[saved]) { activePeer = saved; openChat(activePeer); }
-  else { const m = $('main-chat'); if (m) m.classList.add('hidden'); }
-}
-function renderContactList() {
-  const list = getEl('contact-list'); if (!list) return;
-  list.innerHTML = '';
-  Object.entries(contacts).forEach(([peerId, data]) => {
-    const div = document.createElement('div');
-    div.className = 'contact-item' + (peerId === activePeer ? ' active' : '');
-    div.innerHTML = `<span class="contact-avatar">${data.avatar || '👤'}</span><span class="contact-name">${data.name || peerId.slice(0, 8)}</span><button class="delete-btn" onclick="event.stopPropagation(); deleteChat('${peerId}')">✕</button>`;
-    div.onclick = () => openChat(peerId);
-    list.appendChild(div);
-  });
-}
-async function deleteChat(peerId) {
-  if (!contacts[peerId] || !confirm('Удалить чат и историю с ' + (contacts[peerId]?.name || peerId) + '?')) return;
-  const histKey = `history_${[currentUser, peerId].sort().join('_')}`;
-  localStorage.removeItem(masterPassword ? `hist_${histKey}` : histKey);
-  localStorage.removeItem(`pinned_${peerId}`);
-  dropPeer(peerId);
-  delete contacts[peerId];
-  await saveContacts();
-  if (activePeer === peerId) { activePeer = null; localStorage.removeItem('activePeer'); const m = $('main-chat'); if (m) m.classList.add('hidden'); }
-  renderContactList();
-}
-async function saveContacts() { await saveContactsSecure(); }
+    checkAuth: async () => {
+        const hasData = localStorage.getItem('contacts_encrypted');
+        if (hasData) {
+            await UI.promptPassword(false);
+        } else {
+            const wantPass = confirm('Создать мастер-пароль для шифрования базы данных?');
+            if (wantPass) await UI.promptPassword(true);
+        }
+        UI.bootstrap();
+    },
 
-// ==================== UI чата ====================
-function updateUIForPeer(peerId) {
-  activePeer = peerId;
-  localStorage.setItem('activePeer', peerId);
-  const mainChat = $('main-chat'), sidebar = $('sidebar');
-  if (mainChat) { mainChat.classList.remove('hidden'); mainChat.style.display = 'flex'; }
-  if (sidebar && window.innerWidth <= 700) { sidebar.classList.remove('visible'); sidebar.classList.add('hidden'); }
-  const peer = contacts[peerId] || {};
-  const cn = $('chat-name'); if (cn) cn.textContent = peer.name || peerId.slice(0, 8);
-  const ca = $('chat-avatar'); if (ca) ca.textContent = peer.avatar || '👤';
-  const cs = $('chat-status'); if (cs) cs.textContent = (channels[peerId] && channels[peerId].readyState === 'open') ? 'онлайн' : 'подключение...';
-  updateKeyDisplay(); loadMessages(peerId); loadPinned(peerId); renderContactList();
-}
-async function loadMessages(peerId) {
-  const container = $('messages'); if (!container) return;
-  const hist = await loadMessageHistory(peerId);
-  container.innerHTML = '';
-  const localKey = contacts[peerId]?.localSessionKey, remoteKey = contacts[peerId]?.remoteKey;
-  for (const msg of hist) {
-    const isMine = msg.from === currentUser;
-    let content = '';
-    if (msg.type === 'image') {
-      const k = isMine ? remoteKey : localKey;
-      try {
-        const dec = k && msg.ciphertext ? await CryptoSystem.decryptData(msg.ciphertext, k) : null;
-        content = dec ? `<img src="${URL.createObjectURL(new Blob([dec], { type: msg.mimeType || 'image/jpeg' }))}" alt="изображение" loading="lazy"/>` : '🔒 Зашифрованное изображение';
-      } catch (e) { content = '🔒 Зашифрованное изображение'; }
-    } else {
-      const k = isMine ? remoteKey : localKey;
-      const dec = k && msg.ciphertext ? await CryptoSystem.decrypt(msg.ciphertext, k) : null;
-      content = dec !== null ? dec : '🔒 Зашифровано';
+    promptPassword: (isCreate) => {
+        return new Promise(async (resolve) => {
+            const modal = document.getElementById('master-password-modal');
+            const title = document.getElementById('mp-title');
+            const desc = document.getElementById('mp-desc');
+            const input = document.getElementById('master-password-input');
+            const confirm = document.getElementById('master-password-confirm');
+            const btn = document.getElementById('mp-submit-btn');
+            const err = document.getElementById('mp-error');
+
+            modal.classList.remove('hidden');
+            title.textContent = isCreate ? 'Создание ключа' : 'Авторизация';
+            desc.textContent = isCreate ? 'Придумайте надежный пароль.' : 'Введите пароль для доступа.';
+            btn.textContent = isCreate ? 'Создать' : 'Войти';
+            confirm.classList.toggle('hidden', !isCreate);
+            input.value = ''; confirm.value = ''; err.classList.add('hidden');
+
+            const submit = async () => {
+                const pass = input.value.trim();
+                if (pass.length < 6) { err.textContent = 'Минимум 6 символов'; err.classList.remove('hidden'); return; }
+                if (isCreate && pass !== confirm.value.trim()) { err.textContent = 'Пароли не совпадают'; err.classList.remove('hidden'); return; }
+                
+                if (!isCreate) {
+                    const test = await CryptoSystem.decryptWithMaster(localStorage.getItem('contacts_encrypted'), pass);
+                    if (test === null) { err.textContent = 'Неверный пароль'; err.classList.remove('hidden'); return; }
+                }
+
+                window.WebRTC.getState().masterPassword = pass; // Hacky sync
+                masterPassword = pass; // Global sync
+                modal.classList.add('hidden');
+                resolve();
+            };
+
+            btn.onclick = submit;
+            input.onkeydown = e => e.key === 'Enter' && submit();
+            input.focus();
+        });
+    },
+
+    bootstrap: async () => {
+        // Init User
+        if (!localStorage.getItem('uid')) localStorage.setItem('uid', CryptoSystem.generateKey().slice(0, 16));
+        currentUser = localStorage.getItem('uid');
+        
+        // Load Data
+        await UI.loadSettings();
+        UI.setupListeners();
+        
+        document.getElementById('app').classList.remove('hidden');
+        document.getElementById('main-chat').classList.add('hidden');
+        document.getElementById('sidebar').classList.remove('hidden-mobile');
+    },
+
+    loadSettings: async () => {
+        myName = localStorage.getItem('myName') || 'Node_01';
+        myAvatar = localStorage.getItem('myAvatar') || '';
+        
+        const state = window.WebRTC.getState();
+        if (state.masterPassword) {
+            contacts = await CryptoSystem.loadEncryptedContacts(state.masterPassword) || {};
+        } else {
+            contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
+        }
+        UI.renderContacts();
+    },
+
+    renderContacts: () => {
+        const list = document.getElementById('contact-list');
+        list.innerHTML = '';
+        Object.entries(contacts).forEach(([id, c]) => {
+            const div = document.createElement('div');
+            div.className = `contact-item ${id === activePeer ? 'active' : ''}`;
+            div.innerHTML = `
+                <div class="avatar-placeholder">${c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>'}</div>
+                <div class="contact-info">
+                    <div class="contact-name">${c.name || id.slice(0,6)}</div>
+                    <div class="contact-preview">Secure Channel</div>
+                </div>
+            `;
+            div.onclick = () => UI.openChat(id);
+            list.appendChild(div);
+        });
+    },
+
+    openChat: (id) => {
+        activePeer = id;
+        localStorage.setItem('activePeer', id);
+        document.getElementById('sidebar').classList.add('hidden-mobile');
+        document.getElementById('main-chat').classList.remove('hidden');
+        
+        const c = contacts[id] || {};
+        document.getElementById('chat-name').textContent = c.name || id.slice(0,6);
+        document.getElementById('chat-avatar').innerHTML = c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>';
+        
+        UI.updateStatus();
+        UI.loadMessages(id);
+        UI.renderContacts();
+    },
+
+    updateStatus: () => {
+        const state = window.WebRTC.getState();
+        const isOnline = state.dataChannel && state.dataChannel.readyState === 'open';
+        const dot = document.getElementById('status-dot');
+        const txt = document.getElementById('chat-status');
+        const banner = document.getElementById('connection-banner');
+        const restoreBtn = document.getElementById('restore-btn');
+
+        if (isOnline) {
+            dot.className = 'dot online';
+            txt.textContent = 'Secure Connection';
+            banner.classList.add('hidden');
+            restoreBtn.classList.add('hidden');
+        } else {
+            dot.className = 'dot offline';
+            txt.textContent = 'Disconnected';
+            if (activePeer) {
+                banner.classList.remove('hidden');
+                restoreBtn.classList.remove('hidden');
+            }
+        }
+    },
+
+    loadMessages: async (id) => {
+        const container = document.getElementById('messages-container');
+        container.innerHTML = '';
+        const history = await window.WebRTC.loadHistory(id);
+        const state = window.WebRTC.getState();
+        const localKey = contacts[id]?.localSessionKey;
+        const remoteKey = contacts[id]?.remoteKey;
+
+        for (const msg of history) {
+            const isMine = msg.from === state.currentUser;
+            const div = document.createElement('div');
+            div.className = `message ${isMine ? 'mine' : 'other'}`;
+            
+            let content = '🔒 Encrypted';
+            const key = isMine ? remoteKey : localKey;
+
+            if (msg.type === 'image') {
+                if (key && msg.ciphertext) {
+                    const buf = await CryptoSystem.decryptData(msg.ciphertext, key);
+                    if (buf) {
+                        const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
+                        content = `<img src="${url}" onclick="UI.openLightbox('${url}')">`;
+                    }
+                }
+            } else {
+                if (key && msg.ciphertext) {
+                    const txt = await CryptoSystem.decrypt(msg.ciphertext, key);
+                    if (txt) content = txt;
+                }
+            }
+
+            div.innerHTML = `<div>${content}</div><span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
+            container.appendChild(div);
+        }
+        container.scrollTop = container.scrollHeight;
+    },
+
+    setupListeners: () => {
+        // Theme
+        document.getElementById('theme-toggle-btn').onclick = () => {
+            document.body.classList.toggle('light');
+            const isLight = document.body.classList.contains('light');
+            localStorage.setItem('theme', isLight ? 'light' : 'dark');
+            document.querySelector('.theme-icon-dark').classList.toggle('hidden', isLight);
+            document.querySelector('.theme-icon-light').classList.toggle('hidden', !isLight);
+        };
+
+        // Modals
+        document.getElementById('new-chat-btn').onclick = () => {
+            document.getElementById('new-chat-modal').classList.remove('hidden');
+            UI.showStep('step-role');
+        };
+        document.querySelectorAll('.close-modal').forEach(b => b.onclick = () => b.closest('.modal-overlay').classList.add('hidden'));
+
+        // Settings
+        document.getElementById('settings-btn').onclick = () => {
+            document.getElementById('set-name').value = myName;
+            document.getElementById('set-avatar').value = myAvatar;
+            document.getElementById('settings-modal').classList.remove('hidden');
+        };
+        document.getElementById('btn-save-settings').onclick = async () => {
+            myName = document.getElementById('set-name').value || 'Node_01';
+            myAvatar = document.getElementById('set-avatar').value || '';
+            localStorage.setItem('myName', myName);
+            localStorage.setItem('myAvatar', myAvatar);
+            UI.renderContacts();
+            document.getElementById('settings-modal').classList.add('hidden');
+        };
+        document.getElementById('btn-wipe').onclick = () => {
+            if (confirm('Удалить все данные? Это необратимо.')) { localStorage.clear(); location.reload(); }
+        };
+
+        // Chat Input
+        const inp = document.getElementById('message-input');
+        inp.addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = (this.scrollHeight) + 'px';
+            UI.toggleSendBtn();
+        });
+        inp.addEventListener('keypress', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.WebRTC.sendMessage(); }
+        });
+        document.getElementById('send-btn').onclick = window.WebRTC.sendMessage;
+        document.getElementById('attach-btn').onclick = () => document.getElementById('file-input').click();
+        document.getElementById('file-input').onchange = e => { if(e.target.files[0]) window.WebRTC.sendImage(e.target.files[0]); e.target.value=''; };
+
+        // Back
+        document.getElementById('back-btn').onclick = () => {
+            document.getElementById('sidebar').classList.remove('hidden-mobile');
+            document.getElementById('main-chat').classList.add('hidden');
+        };
+
+        // Host Flow
+        document.getElementById('btn-host-copy').onclick = () => { navigator.clipboard.writeText(window.currentPayload); alert('Copied'); };
+        document.getElementById('btn-host-qr').onclick = () => alert('QR: ' + window.currentPayload); // Simplified
+        
+        // Guest Flow
+        document.getElementById('guest-offer-input').addEventListener('input', window.WebRTC.processGuestInput);
+        document.getElementById('btn-guest-generate').onclick = window.WebRTC.generateAnswer;
+        document.getElementById('btn-guest-copy').onclick = () => { navigator.clipboard.writeText(window.guestPayload); alert('Copied'); };
+
+        // Paste Zones
+        UI.setupPaste('host-paste-zone', 'host-answer-input');
+        UI.setupPaste('guest-paste-zone', 'guest-offer-input');
+
+        // Fingerprint
+        document.getElementById('verify-btn').onclick = UI.showFingerprint;
+        document.getElementById('fp-confirm').onclick = () => { document.getElementById('fp-modal').classList.add('hidden'); alert('Verified'); };
+        document.getElementById('fp-deny').onclick = () => { document.getElementById('fp-modal').classList.add('hidden'); alert('Aborted'); };
+    },
+
+    toggleSendBtn: () => {
+        const btn = document.getElementById('send-btn');
+        const inp = document.getElementById('message-input');
+        btn.disabled = inp.value.trim().length === 0;
+    },
+
+    setupPaste: (zoneId, inputId) => {
+        const zone = document.getElementById(zoneId);
+        const input = document.getElementById(inputId);
+        zone.onclick = () => input.focus();
+        zone.addEventListener('paste', (e) => {
+            setTimeout(() => {
+                input.dispatchEvent(new Event('input'));
+                if (zoneId.includes('host')) {
+                    // Auto trigger connect if valid
+                    // In real app, parse and trigger
+                }
+            }, 100);
+        });
+    },
+
+    showStep: (id) => {
+        document.querySelectorAll('.step-view').forEach(el => el.classList.remove('active'));
+        document.getElementById(id).classList.add('active');
+    },
+
+    selectRole: (role) => {
+        if (role === 'host') window.WebRTC.startHost();
+        else window.WebRTC.startGuest();
+    },
+
+    goBack: () => UI.showStep('step-role'),
+
+    setVoiceCode: (type, code) => {
+        document.getElementById(`${type}-voice-code`).textContent = code;
+    },
+
+    showLoader: (type) => {
+        document.getElementById(`${type}-loader`).classList.remove('hidden');
+    },
+
+    hideLoaders: () => {
+        document.querySelectorAll('.loader-container').forEach(el => el.classList.add('hidden'));
+    },
+
+    resetGuest: () => {
+        document.getElementById('guest-result').classList.add('hidden');
+        document.getElementById('btn-guest-generate').disabled = true;
+        document.getElementById('guest-offer-input').value = '';
+    },
+
+    showGuestResult: (code, payload) => {
+        window.guestPayload = payload;
+        UI.setVoiceCode('guest', code);
+        document.getElementById('guest-result').classList.remove('hidden');
+    },
+
+    showFingerprint: async () => {
+        const state = window.WebRTC.getState();
+        if (!state.peerConnection) return;
+        const local = CryptoSystem.extractFingerprint(state.peerConnection.localDescription?.sdp);
+        const remote = CryptoSystem.extractFingerprint(state.peerConnection.remoteDescription?.sdp);
+        if (!local || !remote) return alert('No active connection');
+        
+        document.getElementById('fp-local').textContent = await CryptoSystem.generateVoiceCode(local);
+        document.getElementById('fp-remote').textContent = await CryptoSystem.generateVoiceCode(remote);
+        document.getElementById('fp-modal').classList.remove('hidden');
+    },
+
+    openLightbox: (src) => {
+        const lb = document.getElementById('lightbox');
+        document.getElementById('lb-img').src = src;
+        lb.classList.remove('hidden');
+        lb.onclick = (e) => { if(e.target === lb || e.target.closest('.lb-close')) lb.classList.add('hidden'); };
+    },
+
+    loadTheme: () => {
+        if (localStorage.getItem('theme') === 'light') {
+            document.body.classList.add('light');
+            document.querySelector('.theme-icon-dark').classList.add('hidden');
+            document.querySelector('.theme-icon-light').classList.remove('hidden');
+        }
     }
-    const div = document.createElement('div');
-    div.className = `message ${isMine ? 'my-message' : 'other-message'}`;
-    div.innerHTML = `<div class="message-content">${content}</div><div class="message-time">${new Date(msg.timestamp).toLocaleTimeString()}</div><button class="delete-btn" style="opacity:.4" onclick="togglePin('${peerId}', ${msg.timestamp})">📌</button>`;
-    container.appendChild(div);
-  }
-  setTimeout(() => { container.scrollTop = container.scrollHeight; }, 100);
-}
-function updateKeyDisplay() {
-  if (!activePeer) return;
-  const mk = getEl('my-key-display'), pk = getEl('partner-key-display');
-  const lk = contacts[activePeer]?.localSessionKey, rk = contacts[activePeer]?.remoteKey;
-  if (mk) mk.innerText = lk ? lk.slice(0, 8) + '...' : 'none';
-  if (pk) pk.innerText = rk ? rk.slice(0, 8) + '...' : '(ожидание...)';
-}
-function handleImageUpload(event) { const f = event.target.files[0]; if (f) { sendImage(f); event.target.value = ''; } }
-async function togglePin(peerId, ts) {
-  const hist = await loadMessageHistory(peerId);
-  const msg = hist.find(m => m.timestamp === ts); if (!msg) return;
-  const pinnedKey = `pinned_${peerId}`;
-  let pinned = JSON.parse(localStorage.getItem(pinnedKey) || '[]');
-  if (pinned.find(p => p.ts === ts)) pinned = pinned.filter(p => p.ts !== ts);
-  else {
-    let text = '🖼️ Изображение';
-    if (msg.type !== 'image') {
-      const k = (msg.from === currentUser) ? contacts[peerId]?.remoteKey : contacts[peerId]?.localSessionKey;
-      const dec = k ? await CryptoSystem.decrypt(msg.ciphertext, k) : null;
-      text = dec || '🔒 Зашифровано';
-    }
-    pinned.push({ ts, text });
-  }
-  localStorage.setItem(pinnedKey, JSON.stringify(pinned));
-  loadPinned(peerId);
-}
-function loadPinned(peerId) {
-  const el = $('pinned-messages'); if (!el) return;
-  const pinned = JSON.parse(localStorage.getItem(`pinned_${peerId}`) || '[]');
-  el.innerHTML = pinned.length ? pinned.map(p => `📌 ${p.text}`).join(' | ') : 'Нет закреплённых сообщений';
-}
-function togglePinnedPanel() { const p = $('pinned-panel'); if (p) p.classList.toggle('visible'); }
-function toggleSidebar() { const s = $('sidebar'); if (s) s.classList.toggle('visible'); const m = $('main-chat'); if (m) m.classList.toggle('shifted'); }
+};
 
-// ==================== Код-комнаты (UI) ====================
-function showNewChat() { resetToRoleSelect(); const m = $('new-chat-modal'); if (m) m.classList.remove('hidden'); }
-function closeNewChat() { const m = $('new-chat-modal'); if (m) m.classList.add('hidden'); }
-function resetToRoleSelect() {
-  ['role-select-section', 'host-flow', 'join-flow'].forEach(id => { const el = getEl(id); if (el) el.classList.add('hidden'); });
-  getEl('role-select-section').classList.remove('hidden');
-}
-function showSection(id) {
-  ['role-select-section', 'host-flow', 'join-flow'].forEach(s => { const el = getEl(s); if (el) el.classList.add('hidden'); });
-  getEl(id).classList.remove('hidden');
-}
-async function startHostFlow() {
-  showSection('host-flow');
-  const codeEl = $('host-room-code'), wait = $('host-waiting');
-  codeEl.textContent = 'Создание комнаты...';
-  wait.classList.add('hidden');
-  try {
-    await hostStart(words => {
-      codeEl.textContent = words;
-      copyToClipboard(words);
-      wait.classList.remove('hidden');
-    });
-  } catch (e) { alert('Не удалось создать комнату'); resetToRoleSelect(); }
-}
-function startJoinFlow() {
-  showSection('join-flow');
-  const i = $('join-code-input'); if (i) { i.value = ''; setTimeout(() => i.focus(), 150); }
-  const e = $('join-error'); if (e) e.textContent = '';
-  const w = $('join-waiting'); if (w) w.classList.add('hidden');
-}
-async function joinByCode() {
-  const input = $('join-code-input'), err = $('join-error'), btn = $('join-connect-btn'), wait = $('join-waiting');
-  err.textContent = '';
-  btn.disabled = true; wait.classList.remove('hidden');
-  try {
-    await guestJoin(input.value.trim());
-  } catch (msg) {
-    err.textContent = msg;
-    wait.classList.add('hidden');
-    btn.disabled = false;
-  }
-}
-function copyHostCode() { const el = $('host-room-code'); if (el) copyToClipboard(el.textContent); }
-function copyToClipboard(text) {
-  navigator.clipboard.writeText(text).catch(() => {
-    const ta = document.createElement('textarea'); ta.value = text;
-    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-  });
-}
-
-// ==================== Настройки / тема ====================
-function showSettings() { const m = $('settings-modal'); if (m) m.classList.remove('hidden'); }
-function closeSettings() { const m = $('settings-modal'); if (m) m.classList.add('hidden'); }
-async function saveSettings() {
-  myName = getEl('name-input')?.value.trim() || 'Вы';
-  myAvatar = getEl('avatar-input')?.value.trim() || '';
-  localStorage.setItem('myName', myName); localStorage.setItem('myAvatar', myAvatar);
-  closeSettings(); renderContactList();
-}
-function toggleTheme() {
-  const t = $('theme-toggle');
-  if (t) { document.body.classList.toggle('light', !t.checked); localStorage.setItem('theme', t.checked ? 'dark' : 'light'); }
-}
-function loadTheme() {
-  const t = $('theme-toggle');
-  if (localStorage.getItem('theme') === 'light') { document.body.classList.add('light'); if (t) t.checked = false; }
-  else { document.body.classList.remove('light'); if (t) t.checked = true; }
-}
-async function deleteAllChats() {
-  const count = Object.keys(contacts).length;
-  if (!count) { alert('Нет чатов для удаления.'); return; }
-  if (!confirm(`⚠️ Удалить ВСЕ чаты (${count})? История и ключи будут потеряны безвозвратно!`)) return;
-  if (!confirm('Точно уверены? Это действие нельзя отменить.')) return;
-  Object.keys(contacts).forEach(pid => dropPeer(pid));
-  if (pendingHostPeer) { try { pendingHostPeer.destroy(); } catch (e) {} pendingHostPeer = null; }
-  for (const peerId of Object.keys(contacts)) {
-    const histKey = `history_${[currentUser, peerId].sort().join('_')}`;
-    localStorage.removeItem(masterPassword ? `hist_${histKey}` : histKey);
-    localStorage.removeItem(`pinned_${peerId}`);
-  }
-  contacts = {}; await saveContacts();
-  activePeer = null; connectedPeerId = null; verifiedFingerprints = {};
-  localStorage.removeItem('activePeer');
-  renderContactList();
-  const m = $('main-chat'); if (m) m.classList.add('hidden');
-  getEl('messages').innerHTML = '<div class="empty-state"><div class="empty-icon">💬</div><p>Выберите чат или создайте новый</p></div>';
-  updateOnlineStatus(); closeSettings();
-  alert(`✅ Все чаты удалены (${count} шт.)`);
-}
+document.addEventListener('DOMContentLoaded', UI.init);

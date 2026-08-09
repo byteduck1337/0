@@ -1,81 +1,57 @@
-﻿// worker.js — Signaling-сервер для /0byte/ (stateful через in-memory Map)
-// Деплой: wrangler publish (или Cloudflare Dashboard → Workers → Create)
-
-const ROOM_TTL_MS = 15 * 60 * 1000; // 15 минут жизни комнаты
-const rooms = new Map(); // code -> { offer?, answer?, createdAt }
-
-// CORS
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-  'Content-Type': 'application/json'
-};
-
-function cleanup() {
-  const now = Date.now();
-  for (const [code, room] of rooms) {
-    if (now - room.createdAt > ROOM_TTL_MS) rooms.delete(code);
-  }
-}
-
-async function handleRequest(request) {
-  if (request.method === 'OPTIONS') return new Response(null, { headers: CORS_HEADERS });
-
-  cleanup();
-  const url = new URL(request.url);
-  const path = url.pathname;
-
-  // --- ХОСТ: создать комнату с offer ---
-  if (path === '/api/room' && request.method === 'POST') {
-    const { code, offer } = await request.json();
-    if (!code || !offer) return error('code и offer обязательны');
-    rooms.set(code, { offer, createdAt: Date.now() });
-    return json({ ok: true, code });
-  }
-
-  // --- ГОСТЬ: получить offer по коду ---
-  if (path === '/api/room' && request.method === 'GET') {
-    const code = url.searchParams.get('code');
-    if (!code) return error('code обязателен');
-    const room = rooms.get(code);
-    if (!room || !room.offer) return error('Комната не найдена или истекла', 404);
-    return json({ offer: room.offer });
-  }
-
-  // --- ГОСТЬ: отправить answer ---
-  if (path === '/api/answer' && request.method === 'POST') {
-    const { code, answer } = await request.json();
-    if (!code || !answer) return error('code и answer обязательны');
-    const room = rooms.get(code);
-    if (!room) return error('Комната не найдена', 404);
-    room.answer = answer;
-    room.answerAt = Date.now();
-    return json({ ok: true });
-  }
-
-  // --- ХОСТ: получить answer (polling) ---
-  if (path === '/api/answer' && request.method === 'GET') {
-    const code = url.searchParams.get('code');
-    const room = rooms.get(code);
-    if (!room || !room.answer) return json({ answer: null });
-    return json({ answer: room.answer });
-  }
-
-  // --- Пинг ---
-  if (path === '/api/ping') return json({ ok: true, rooms: rooms.size });
-
-  return error('Неизвестный маршрут', 404);
-}
-
-function json(data) { return new Response(JSON.stringify(data), { headers: CORS_HEADERS }); }
-function error(msg, status = 400) {
-  return new Response(JSON.stringify({ error: msg }), { status, headers: CORS_HEADERS });
-}
+const KV_NAMESPACE = SIGNALING_KV; // Bind this in wrangler.toml
 
 export default {
-  async fetch(request) {
-    try { return await handleRequest(request); }
-    catch (e) { return error('Internal error: ' + e.message, 500); }
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+    try {
+      // POST /signal - Save signal data (Offer/Answer)
+      if (request.method === 'POST' && url.pathname === '/signal') {
+        const { roomId, type, data, ttl } = await request.json();
+        if (!roomId || !type || !data) return new Response('Missing fields', { status: 400, headers: corsHeaders });
+        
+        // Store with expiration (e.g., 1 hour)
+        await env.SIGNALING_KV.put(`room:${roomId}:${type}`, JSON.stringify(data), { expirationTtl: ttl || 3600 });
+        return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
+      }
+
+      // GET /signal?roomId=X&type=offer - Retrieve signal data
+      if (request.method === 'GET' && url.pathname === '/signal') {
+        const roomId = url.searchParams.get('roomId');
+        const type = url.searchParams.get('type');
+        if (!roomId || !type) return new Response('Missing params', { status: 400, headers: corsHeaders });
+
+        const data = await env.SIGNALING_KV.get(`room:${roomId}:${type}`);
+        if (!data) return new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: corsHeaders });
+        
+        return new Response(data, { headers: corsHeaders });
+      }
+
+      // POST /generate-room - Create short room ID
+      if (request.method === 'POST' && url.pathname === '/generate-room') {
+        const roomId = generateShortId();
+        return new Response(JSON.stringify({ roomId }), { headers: corsHeaders });
+      }
+
+      return new Response('Not Found', { status: 404, headers: corsHeaders });
+    } catch (e) {
+      return new Response(e.message, { status: 500, headers: corsHeaders });
+    }
   }
 };
+
+function generateShortId() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No I, O, 0, 1 to avoid confusion
+  let result = '';
+  const bytes = new Uint8Array(4);
+  crypto.getRandomValues(bytes);
+  for (let i = 0; i < 4; i++) result += chars[bytes[i] % chars.length];
+  return result;
+}

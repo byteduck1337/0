@@ -1,5 +1,5 @@
 ﻿// --- Configuration ---
-const SIGNALING_URL = 'https://your-worker-name.workers.dev'; // Замените на ваш URL
+const SIGNALING_URL = 'https://0.okeysexsex.workers.dev/'; // Замените на ваш URL
 const USE_LOCAL_SIGNALING = true; // true для теста, false для Cloudflare
 
 // --- State ---

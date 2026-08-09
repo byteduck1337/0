@@ -1,6 +1,6 @@
 ﻿// --- Configuration ---
 const SIGNALING_URL = 'https://0.okeysexsex.workers.dev/'; // Замените на ваш URL
-const USE_LOCAL_SIGNALING = true; // true для теста, false для Cloudflare
+const USE_LOCAL_SIGNALING = false; // true для теста, false для Cloudflare
 
 // --- State ---
 let currentUser, myName = 'Node_01', myAvatar = '', contacts = {}, activePeer = null;

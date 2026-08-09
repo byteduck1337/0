@@ -4,11 +4,6 @@ class CryptoSystem {
         crypto.getRandomValues(a);
         return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
     }
-    static generateNonce() {
-        let a = new Uint8Array(12);
-        crypto.getRandomValues(a);
-        return Array.from(a, b => b.toString(16).padStart(2, '0')).join('');
-    }
     static hexToBytes(a) {
         let b = new Uint8Array(a.length / 2);
         for (let c = 0; c < b.length; c++) b[c] = parseInt(a.substr(c * 2, 2), 16);
@@ -97,5 +92,11 @@ class CryptoSystem {
     static extractFingerprint(a) {
         let b = a.match(/a=fingerprint:(sha-\d+) (\S+)/);
         return b ? b[2].replace(/:/g, '').toLowerCase() : null;
+    }
+    static async generateVoiceCode(seed) {
+        const hash = await this.sha256(seed);
+        const bytes = this.hexToBytes(hash.slice(0, 4));
+        const words = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'Red', 'Blue', 'Green', 'Yellow', 'Black', 'White', 'Zero', 'One'];
+        return `${words[bytes[0] % 8]}-${words[8 + (bytes[1] % 6)]}-${bytes[2] % 100}-${bytes[3] % 100}`;
     }
 }

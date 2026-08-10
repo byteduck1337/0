@@ -1,3 +1,7 @@
+const UI_LOG = {
+  info: (...args) => console.log('%c[UI]', 'color: #06b6d4; font-weight: bold', ...args),
+  error: (...args) => console.error('%c[UI Error]', 'color: #ef4444; font-weight: bold', ...args),
+};
 const UI = {
   init: () => {
     UI.loadTheme();

@@ -1,13 +1,28 @@
-
-const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev'; // <-- URL вашего воркера
+const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
 let currentUser, myName = 'Node_01', myAvatar = '';
 let contacts = {}, activePeer = null, masterPassword = null;
 let peerConnection = null, dataChannel = null, pendingLocalKey = null;
 let keySendInterval = null, session = null;
 
-/* ---------------- секретные фразы ---------------- */
+/* ======================================================================
+   ЦВЕТНОЕ ЛОГИРОВАНИЕ
+   ====================================================================== */
+const LOG = {
+  webrtc:  (...a) => console.log('%c[WebRTC]%c',   'color:#38bdf8;font-weight:bold', 'color:inherit', ...a),
+  signal:  (...a) => console.log('%c[Signal]%c',   'color:#fbbf24;font-weight:bold', 'color:inherit', ...a),
+  channel: (...a) => console.log('%c[Channel]%c',  'color:#10b981;font-weight:bold', 'color:inherit', ...a),
+  keys:    (...a) => console.log('%c[Keys]%c',     'color:#a78bfa;font-weight:bold', 'color:inherit', ...a),
+  crypto:  (...a) => console.log('%c[Crypto]%c',   'color:#f472b6;font-weight:bold', 'color:inherit', ...a),
+  send:    (...a) => console.log('%c[Send]%c',     'color:#34d399;font-weight:bold', 'color:inherit', ...a),
+  history: (...a) => console.log('%c[History]%c',  'color:#60a5fa;font-weight:bold', 'color:inherit', ...a),
+  error:   (...a) => console.error('%c[ERROR]%c',  'color:#ef4444;font-weight:bold', 'color:inherit', ...a),
+  warn:    (...a) => console.warn('%c[WARN]%c',    'color:#f59e0b;font-weight:bold', 'color:inherit', ...a),
+};
 
+/* ======================================================================
+   СЕКРЕТНЫЕ ФРАЗЫ
+   ====================================================================== */
 const ADJ = [
   'быстрый','тихий','смелый','красный','синий','белый','чёрный','серый','ясный','тёплый',
   'холодный','летний','зимний','весенний','осенний','дикий','гордый','умный','добрый','строгий',
@@ -40,14 +55,17 @@ function normalizePhrase(raw) {
   return (raw || '').toLowerCase().replace(/[^a-zа-яё0-9]/g, '');
 }
 
-/* ---------------- сигнальный сервер ---------------- */
-
+/* ======================================================================
+   СИГНАЛЬНЫЙ СЕРВЕР (с логами)
+   ====================================================================== */
 const Signal = {
   async getOffer(id) {
+    LOG.signal('GET /offer', { roomId: id });
     try {
       const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, { cache: 'no-store' });
+      LOG.signal('← offer', r.status);
       return r.ok ? await r.json() : null;
-    } catch (e) { return null; }
+    } catch (e) { LOG.error('getOffer failed:', e); return null; }
   },
   async getAnswer(id) {
     try {
@@ -56,32 +74,42 @@ const Signal = {
     } catch (e) { return null; }
   },
   async postOffer(id, sdp) {
-    return fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, {
+    LOG.signal('POST /offer', { roomId: id, sdpLen: sdp.length });
+    const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sdp }),
     });
+    LOG.signal('← offer result', r.status);
+    return r;
   },
   async postAnswer(id, sdp) {
-    return fetch(`${SIGNALING_URL}/api/rooms/${id}/answer`, {
+    LOG.signal('POST /answer', { roomId: id, sdpLen: sdp.length });
+    const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sdp }),
     });
+    LOG.signal('← answer result', r.status);
+    return r;
   },
   closeRoom(id) {
+    LOG.signal('CLOSE room', id);
     fetch(`${SIGNALING_URL}/api/rooms/${id}/close`, { method: 'POST' }).catch(() => {});
   },
 };
 
-/* ---------------- управление соединением ---------------- */
-
+/* ======================================================================
+   УПРАВЛЕНИЕ СОЕДИНЕНИЕМ
+   ====================================================================== */
 async function connect(rawPhrase) {
   const clean = (rawPhrase || '').trim();
   const norm = normalizePhrase(clean);
+  LOG.webrtc('connect() phrase:', { raw: clean, normalized: norm });
   if (norm.length < 5) throw new Error('Фраза слишком короткая — минимум 5 символов');
 
   const roomId = (await CryptoSystem.sha256(norm)).slice(0, 16);
+  LOG.webrtc('roomId:', roomId);
   cancelConnect(true);
 
   session = {
@@ -98,8 +126,10 @@ async function connect(rawPhrase) {
   if (session.aborted) return;
 
   if (existing) {
+    LOG.webrtc('Existing offer found → joining as GUEST');
     await joinAsGuest(session, existing);
   } else {
+    LOG.webrtc('No offer → trying as HOST');
     await tryHost(session);
   }
 }
@@ -107,6 +137,7 @@ async function connect(rawPhrase) {
 async function tryHost(s) {
   s.role = 'host';
   pendingLocalKey = CryptoSystem.generateKey();
+  LOG.keys('Host: generated local key', pendingLocalKey.slice(0, 8) + '...');
   setupPeerConnection(s.roomId, true);
 
   const offer = await peerConnection.createOffer();
@@ -122,7 +153,7 @@ async function tryHost(s) {
     if (body.error === 'session_active') {
       throw new Error('Фраза занята завершённой сессией. Попробуйте другую фразу.');
     }
-    // Кто-то успел стать хостом раньше — становимся гостем
+    LOG.webrtc('Conflict 409 → falling back to GUEST');
     const theirOffer = await Signal.getOffer(s.roomId);
     if (!theirOffer) throw new Error('Не удалось подключиться. Попробуйте ещё раз.');
     return joinAsGuest(s, theirOffer);
@@ -130,6 +161,7 @@ async function tryHost(s) {
 
   await upsertContact(s);
   UI.setConnectStage('waiting');
+  LOG.webrtc('Host: waiting for answer...');
 
   s.timer = setTimeout(() => failConnect('Время ожидания истекло'), 5 * 60 * 1000);
 
@@ -137,9 +169,10 @@ async function tryHost(s) {
     if (s.aborted || session !== s) return;
     const ans = await Signal.getAnswer(s.roomId);
     if (ans && ans.sdp) {
+      LOG.webrtc('Answer received, setting remote description');
       try {
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: ans.sdp });
-      } catch (e) { console.error('answer:', e); }
+      } catch (e) { LOG.error('setRemoteDescription(answer) failed:', e); }
     } else {
       setTimeout(poll, 1500);
     }
@@ -151,8 +184,10 @@ async function joinAsGuest(s, offerData) {
   s.role = 'guest';
   UI.setConnectStage('linking');
   pendingLocalKey = CryptoSystem.generateKey();
+  LOG.keys('Guest: generated local key', pendingLocalKey.slice(0, 8) + '...');
   setupPeerConnection(s.roomId, false);
 
+  LOG.webrtc('Setting remote offer');
   await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
@@ -161,12 +196,14 @@ async function joinAsGuest(s, offerData) {
 
   await Signal.postAnswer(s.roomId, peerConnection.localDescription.sdp);
   await upsertContact(s);
+  LOG.webrtc('Guest: answer posted, waiting for WebRTC handshake');
 
   s.timer = setTimeout(() => failConnect('Узел не отвечает'), 90 * 1000);
 }
 
 function cancelConnect(silent = false) {
   if (session) {
+    LOG.webrtc('cancelConnect()', { role: session.role, roomId: session.roomId });
     session.aborted = true;
     if (session.timer) clearTimeout(session.timer);
     if (session.role === 'host') Signal.closeRoom(session.roomId);
@@ -177,6 +214,7 @@ function cancelConnect(silent = false) {
 }
 
 function failConnect(message) {
+  LOG.error('Connection failed:', message);
   if (session) {
     session.aborted = true;
     if (session.timer) clearTimeout(session.timer);
@@ -188,6 +226,7 @@ function failConnect(message) {
 }
 
 function teardownPeer() {
+  LOG.webrtc('teardownPeer()');
   if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
   if (dataChannel) { try { dataChannel.close(); } catch (e) {} dataChannel = null; }
   if (peerConnection) { try { peerConnection.close(); } catch (e) {} peerConnection = null; }
@@ -198,6 +237,7 @@ function teardownPeer() {
 function onLinkEstablished() {
   if (!session) return;
   const s = session;
+  LOG.webrtc('✅ LINK ESTABLISHED', { roomId: s.roomId, role: s.role });
   if (s.timer) clearTimeout(s.timer);
   if (s.role === 'host') Signal.closeRoom(s.roomId);
   session = null;
@@ -210,33 +250,42 @@ async function reconnect(peerId) {
     UI.toast('Секретная фраза для этого чата не сохранена', 'error');
     return;
   }
+  LOG.webrtc('reconnect() with phrase:', c.phrase);
   UI.openNewSession(c.phrase, true);
 }
 
-/* ---------------- WebRTC / DataChannel ---------------- */
-
+/* ======================================================================
+   WEBRTC / DATACHANNEL (с подробным логированием)
+   ====================================================================== */
 function setupPeerConnection(roomId, isHost) {
   teardownPeer();
   const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
   peerConnection = new RTCPeerConnection(config);
+  LOG.webrtc('RTCPeerConnection created', { roomId, isHost });
 
-  peerConnection.oniceconnectionstatechange = () => UI.updateStatus();
+  peerConnection.oniceconnectionstatechange = () => {
+    LOG.webrtc('ICE state:', peerConnection.iceConnectionState);
+    UI.updateStatus();
+  };
   peerConnection.onconnectionstatechange = () => {
     if (!peerConnection) return;
-    UI.updateStatus();
     const st = peerConnection.connectionState;
+    LOG.webrtc('Connection state:', st);
+    UI.updateStatus();
     if (st === 'connected') onLinkEstablished();
     if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
-      failConnect('Не удалось установить соединение');
+      failConnect('Не удалось установить соединение (state=' + st + ')');
     }
   };
 
   if (isHost) {
     dataChannel = peerConnection.createDataChannel('mesh', { ordered: true });
+    LOG.channel('DataChannel created by HOST');
     setupDataChannel(roomId);
   } else {
     peerConnection.ondatachannel = (e) => {
       dataChannel = e.channel;
+      LOG.channel('DataChannel received by GUEST');
       setupDataChannel(roomId);
     };
   }
@@ -244,14 +293,17 @@ function setupPeerConnection(roomId, isHost) {
 
 function setupDataChannel(roomId) {
   if (!dataChannel) return;
+  LOG.channel('setupDataChannel for roomId:', roomId);
 
   const sendKey = () => {
     if (dataChannel && dataChannel.readyState === 'open' && pendingLocalKey) {
+      LOG.keys('⬆ sending local key to peer', pendingLocalKey.slice(0, 8) + '...');
       dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
     }
   };
 
   dataChannel.onopen = () => {
+    LOG.channel('✅ DataChannel OPEN');
     sendKey();
     keySendInterval = setInterval(sendKey, 1000);
     activePeer = roomId;
@@ -263,6 +315,7 @@ function setupDataChannel(roomId) {
   };
 
   dataChannel.onclose = () => {
+    LOG.channel('❌ DataChannel CLOSED');
     if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
     UI.updateStatus();
     if (activePeer === roomId) {
@@ -271,21 +324,38 @@ function setupDataChannel(roomId) {
     }
   };
 
+  dataChannel.onerror = (e) => {
+    LOG.error('DataChannel error:', e);
+  };
+
   dataChannel.onmessage = async (event) => {
     try {
       const msg = JSON.parse(event.data);
+      LOG.channel('⬇ incoming message, type:', msg.type);
+
       if (msg.type === 'key') {
+        LOG.keys('Received REMOTE key:', msg.key.slice(0, 8) + '...');
         const c = contacts[roomId];
         if (c) {
           if (!c.remoteKeys) c.remoteKeys = [];
-          if (!c.remoteKeys.includes(msg.key)) c.remoteKeys.push(msg.key);
+          if (!c.remoteKeys.includes(msg.key)) {
+            c.remoteKeys.push(msg.key);
+            LOG.keys('New remote key added. Total keys:', c.remoteKeys.length);
+          } else {
+            LOG.keys('Remote key already known (duplicate)');
+          }
           await saveContacts();
           if (activePeer === roomId) UI.loadMessages(roomId);
+          LOG.keys('⬆ sending key_ack');
           dataChannel.send(JSON.stringify({ type: 'key_ack' }));
+        } else {
+          LOG.warn('Contact not found for roomId:', roomId);
         }
       } else if (msg.type === 'key_ack') {
+        LOG.keys('Received key_ack — stopping key broadcast');
         if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
       } else if (msg.type === 'message' || msg.type === 'image') {
+        LOG.channel('Incoming ' + msg.type + ', ciphertext length:', msg.ciphertext?.length);
         await saveMessage(roomId, msg);
         if (roomId === activePeer) {
           UI.loadMessages(roomId);
@@ -294,23 +364,36 @@ function setupDataChannel(roomId) {
           UI.renderContacts();
         }
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      LOG.error('onmessage parse error:', e, 'raw:', event.data.slice(0, 200));
+    }
   };
 }
 
 async function waitForIce() {
+  LOG.webrtc('waitForIce() start');
   return new Promise(resolve => {
     if (!peerConnection) return resolve();
-    if (peerConnection.iceGatheringState === 'complete') return resolve();
+    if (peerConnection.iceGatheringState === 'complete') {
+      LOG.webrtc('waitForIce() already complete');
+      return resolve();
+    }
     peerConnection.onicegatheringstatechange = () => {
-      if (peerConnection.iceGatheringState === 'complete') resolve();
+      if (peerConnection.iceGatheringState === 'complete') {
+        LOG.webrtc('waitForIce() complete');
+        resolve();
+      }
     };
-    setTimeout(resolve, 3000);
+    setTimeout(() => {
+      LOG.warn('waitForIce() timeout (3s)');
+      resolve();
+    }, 3000);
   });
 }
 
-/* ---------------- контакты и история ---------------- */
-
+/* ======================================================================
+   КОНТАКТЫ И ИСТОРИЯ
+   ====================================================================== */
 async function upsertContact(s) {
   const prev = contacts[s.roomId] || {};
   const updated = {
@@ -328,43 +411,123 @@ async function upsertContact(s) {
   const ordered = { [s.roomId]: updated };
   for (const [k, v] of Object.entries(contacts)) if (k !== s.roomId) ordered[k] = v;
   contacts = ordered;
+  LOG.history('Contact upserted:', {
+    roomId: s.roomId,
+    localKeys: updated.localKeys.length,
+    remoteKeys: updated.remoteKeys.length,
+  });
   await saveContacts();
 }
 
+/* ======================================================================
+   ОТПРАВКА СООБЩЕНИЙ (С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ)
+   ====================================================================== */
 async function sendMessage() {
   const input = document.getElementById('message-input');
   const text = input.value.trim();
-  if (!text || !activePeer || !dataChannel || dataChannel.readyState !== 'open') return;
-  const keys = contacts[activePeer]?.remoteKeys || [];
+
+  LOG.send('sendMessage() called', { textLen: text.length, activePeer, hasChannel: !!dataChannel });
+
+  // Проверка 1: текст не пустой
+  if (!text) {
+    LOG.warn('sendMessage() rejected: empty text');
+    return;
+  }
+
+  // Проверка 2: есть активный пир
+  if (!activePeer) {
+    LOG.error('sendMessage() rejected: no activePeer');
+    UI.toast('Нет активного соединения', 'error');
+    return;
+  }
+
+  // Проверка 3: канал существует
+  if (!dataChannel) {
+    LOG.error('sendMessage() rejected: no dataChannel');
+    UI.toast('Канал не создан', 'error');
+    return;
+  }
+
+  // Проверка 4: канал в состоянии open
+  if (dataChannel.readyState !== 'open') {
+    LOG.error('sendMessage() rejected: channel state =', dataChannel.readyState);
+    UI.toast('Канал не открыт (state=' + dataChannel.readyState + ')', 'error');
+    return;
+  }
+
+  // Проверка 5: контакт существует
+  const contact = contacts[activePeer];
+  if (!contact) {
+    LOG.error('sendMessage() rejected: contact not found for', activePeer);
+    return;
+  }
+
+  // Проверка 6: remoteKeys не пустой
+  const keys = contact.remoteKeys || [];
+  LOG.keys('remoteKeys for activePeer:', keys.length, 'keys');
+  if (keys.length === 0) {
+    LOG.error('sendMessage() rejected: NO REMOTE KEYS — ключ от собеседника не получен');
+    UI.toast('Ожидание обмена ключами... подождите 2-3 секунды', 'error');
+    return;
+  }
+
   const remoteKey = keys[keys.length - 1];
-  if (!remoteKey) return;
+  LOG.crypto('Using remote key:', remoteKey.slice(0, 8) + '...');
+
   try {
+    LOG.crypto('Encrypting text:', text.slice(0, 30) + (text.length > 30 ? '...' : ''));
     const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
-    const msg = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
+    LOG.crypto('Encrypted, length:', ciphertext.length);
+
+    const msg = {
+      type: 'message',
+      from: currentUser,
+      ciphertext,
+      timestamp: Date.now(),
+    };
+
+    LOG.send('Sending via dataChannel, payload size:', JSON.stringify(msg).length, 'bytes');
     dataChannel.send(JSON.stringify(msg));
+    LOG.send('✅ Message SENT');
+
+    LOG.history('Saving to local history...');
     await saveMessage(activePeer, msg);
+    LOG.history('Saved to history');
+
     input.value = '';
     input.style.height = 'auto';
     UI.loadMessages(activePeer);
     UI.toggleSendBtn();
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    LOG.error('sendMessage() failed:', e);
+    UI.toast('Ошибка отправки: ' + e.message, 'error');
+  }
 }
 
 async function sendImage(file) {
-  if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') return;
+  LOG.send('sendImage() called', { name: file.name, size: file.size, type: file.type });
+  if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') {
+    LOG.error('sendImage() rejected: channel not ready');
+    return;
+  }
   const keys = contacts[activePeer]?.remoteKeys || [];
   const remoteKey = keys[keys.length - 1];
-  if (!remoteKey) return;
+  if (!remoteKey) {
+    LOG.error('sendImage() rejected: no remote key');
+    return;
+  }
   try {
     const { blob, type } = await CryptoSystem.compressImage(file, 800);
+    LOG.send('Image compressed, new size:', blob.size);
     const buffer = await blob.arrayBuffer();
     const ciphertext = await CryptoSystem.encryptData(buffer, remoteKey);
     const msg = { type: 'image', from: currentUser, ciphertext, mimeType: type, timestamp: Date.now() };
     dataChannel.send(JSON.stringify(msg));
     await saveMessage(activePeer, msg);
     UI.loadMessages(activePeer);
+    LOG.send('✅ Image sent');
   } catch (e) {
-    console.error(e);
+    LOG.error('sendImage failed:', e);
     UI.toast('Не удалось отправить изображение', 'error');
   }
 }
@@ -379,22 +542,95 @@ async function saveMessage(peerId, msg) {
     if (masterPassword) await CryptoSystem.saveEncryptedHistory(key, history, masterPassword);
     else localStorage.setItem(key, JSON.stringify(history));
   } catch (e) {
-    console.error(e);
+    LOG.error('saveMessage failed:', e);
     UI.toast('Хранилище переполнено', 'error');
   }
 }
 
 async function loadHistory(peerId) {
   const key = `history_${[currentUser, peerId].sort().join('_')}`;
-  return masterPassword
+  const history = masterPassword
     ? await CryptoSystem.loadEncryptedHistory(key, masterPassword)
     : JSON.parse(localStorage.getItem(key) || '[]');
+  LOG.history('loadHistory for', peerId, '→', history.length, 'messages');
+  return history;
 }
 
 async function saveContacts() {
   if (masterPassword) await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
   else localStorage.setItem('contacts', JSON.stringify(contacts));
 }
+
+/* ======================================================================
+   ОТЛАДОЧНЫЕ КОМАНДЫ (вызываются из консоли)
+   ====================================================================== */
+window.debug = {
+  dump: () => {
+    const s = window.WebRTC.getState();
+    console.log('%c===== STATE DUMP =====', 'color:#38bdf8;font-weight:bold;font-size:14px');
+    console.log('currentUser:', s.currentUser);
+    console.log('activePeer:', s.activePeer);
+    console.log('masterPassword set:', !!s.masterPassword);
+    console.log('dataChannel:', s.dataChannel ? s.dataChannel.readyState : 'null');
+    console.log('peerConnection:', s.peerConnection ? s.peerConnection.connectionState : 'null');
+    console.log('session:', s.session);
+    console.log('contacts:', Object.entries(s.contacts).map(([id, c]) => ({
+      id: id.slice(0, 8),
+      name: c.name,
+      localKeys: (c.localKeys || []).length,
+      remoteKeys: (c.remoteKeys || []).length,
+    })));
+
+    if (s.activePeer && s.contacts[s.activePeer]) {
+      const c = s.contacts[s.activePeer];
+      console.log('%c--- Active peer details ---', 'color:#a78bfa;font-weight:bold');
+      console.log('localKeys:', c.localKeys);
+      console.log('remoteKeys:', c.remoteKeys);
+    }
+    return 'dump complete';
+  },
+
+  testCrypto: async (hexKey = null) => {
+    const key = hexKey || (contacts[activePeer]?.remoteKeys || [])[0];
+    if (!key) { console.error('No key to test'); return; }
+    try {
+      const enc = await CryptoSystem.encrypt('hello world', key);
+      const dec = await CryptoSystem.decrypt(enc, key);
+      console.log('Test encrypt+decrypt:', dec === 'hello world' ? '✅ OK' : '❌ MISMATCH');
+      console.log('  key:', key.slice(0, 16) + '...');
+      console.log('  ciphertext len:', enc.length);
+    } catch (e) {
+      console.error('Crypto test failed:', e);
+    }
+  },
+
+  simulateIncoming: async (text = 'test') => {
+    const c = contacts[activePeer];
+    if (!c || !c.localKeys?.length) { console.error('No local key to encrypt as "incoming"'); return; }
+    const localKey = c.localKeys[c.localKeys.length - 1];
+    const ciphertext = await CryptoSystem.encrypt(text, localKey);
+    const msg = { type: 'message', from: activePeer, ciphertext, timestamp: Date.now() };
+    await saveMessage(activePeer, msg);
+    UI.loadMessages(activePeer);
+    console.log('Simulated incoming message saved');
+  },
+
+  resetKeys: (peerId = activePeer) => {
+    if (!peerId || !contacts[peerId]) { console.error('No such peer'); return; }
+    contacts[peerId].remoteKeys = [];
+    contacts[peerId].localKeys = [];
+    saveContacts();
+    console.log('Keys wiped for', peerId);
+  },
+
+  sendTestMessage: () => {
+    const inp = document.getElementById('message-input');
+    inp.value = 'test_' + Date.now();
+    window.WebRTC.sendMessage();
+  },
+};
+
+console.log('%c[DEBUG] /0byte/ ready. Run debug.dump() for full state.', 'color:#38bdf8;font-weight:bold');
 
 window.WebRTC = {
   connect, cancelConnect, reconnect, generatePhrase,

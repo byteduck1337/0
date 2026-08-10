@@ -169,61 +169,68 @@ const UI = {
     }
   },
 
-  loadMessages: async (id) => {
+   loadMessages: async (id) => {
+    UI_LOG.info('Loading messages for:', id);
     const container = document.getElementById('messages-container');
-    if (!container) return;
+    if (!container) {
+      UI_LOG.error('Messages container not found');
+      return;
+    }
     container.innerHTML = '';
     const history = await window.WebRTC.loadHistory(id);
+    UI_LOG.info('History loaded:', history.length, 'messages');
+    
     const state = window.WebRTC.getState();
-    const c = contacts[id] || {};
-    const myKeys = [...(c.remoteKeys || [])].reverse();
-    const theirKeys = [...(c.localKeys || [])].reverse();
-
-    const tryDecrypt = async (ciphertext, keys, isData) => {
-      for (const k of keys) {
-        const res = isData ? await CryptoSystem.decryptData(ciphertext, k)
-                           : await CryptoSystem.decrypt(ciphertext, k);
-        if (res) return res;
-      }
-      return null;
-    };
-
+    const localKey = contacts[id]?.localSessionKey;
+    const remoteKey = contacts[id]?.remoteKey;
+    UI_LOG.info('Keys available:', { localKey: !!localKey, remoteKey: !!remoteKey });
+    
     for (const msg of history) {
-      const mine = msg.from === state.currentUser;
-      const keys = mine ? myKeys : theirKeys;
-      const row = document.createElement('div');
-      row.className = 'message ' + (mine ? 'mine' : 'other');
-      const body = document.createElement('div');
-      body.className = 'msg-body';
-      let ok = false;
-
-      if (msg.type === 'image' && msg.ciphertext) {
-        const buf = await tryDecrypt(msg.ciphertext, keys, true);
-        if (buf) {
-          const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
-          const img = document.createElement('img');
-          img.src = url; img.loading = 'lazy';
-          img.onclick = () => UI.openLightbox(url);
-          body.appendChild(img); ok = true;
+      const isMine = msg.from === state.currentUser;
+      const div = document.createElement('div');
+      div.className = `message ${isMine ? 'mine' : 'other'}`;
+      let content = '🔒 Encrypted';
+      const key = isMine ? remoteKey : localKey;
+      
+      if (msg.type === 'image') {
+        if (key && msg.ciphertext) {
+          const buf = await CryptoSystem.decryptData(msg.ciphertext, key);
+          if (buf) {
+            const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
+            content = `<img src="${url}" onclick="UI.openLightbox('${url}')">`;
+          } else {
+            UI_LOG.error('Failed to decrypt image');
+          }
         }
-      } else if (msg.ciphertext) {
-        const text = await tryDecrypt(msg.ciphertext, keys, false);
-        if (text) { body.textContent = text; ok = true; }
+      } else {
+        if (key && msg.ciphertext) {
+          const txt = await CryptoSystem.decrypt(msg.ciphertext, key);
+          if (txt) {
+            content = txt;
+          } else {
+            UI_LOG.error('Failed to decrypt message');
+          }
+        }
       }
-
-      if (!ok) {
-        body.classList.add('locked');
-        body.innerHTML = '<svg class="icon sm"><use href="#i-lock"></use></svg><span>Не расшифровано</span>';
-      }
-
-      const time = document.createElement('span');
-      time.className = 'msg-time';
-      time.textContent = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      row.appendChild(body);
-      row.appendChild(time);
-      container.appendChild(row);
+      div.innerHTML = `<div>${content}</div><span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
+      container.appendChild(div);
     }
-    requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
+    container.scrollTop = container.scrollHeight;
+  },
+  
+  openChat: (id) => {
+    UI_LOG.info('Opening chat:', id);
+    activePeer = id;
+    localStorage.setItem('activePeer', id);
+    document.getElementById('sidebar').classList.add('hidden-mobile');
+    document.getElementById('main-chat').classList.remove('hidden');
+    const c = contacts[id] || {};
+    document.getElementById('chat-name').textContent = c.name || id.slice(0,6);
+    document.getElementById('chat-avatar').innerHTML = c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>';
+    UI_LOG.info('Contact data:', { name: c.name, hasLocalKey: !!c.localSessionKey, hasRemoteKey: !!c.remoteKey });
+    UI.updateStatus();
+    UI.loadMessages(id);
+    UI.renderContacts();
   },
 
   /* ---------- новое соединение ---------- */

@@ -165,9 +165,9 @@ async function tryHost(s) {
   s.role = 'host';
 
   // ВАЖНО: сначала создаём канал (teardownPeer обнулит старое), потом генерируем ключ
-  setupPeerConnection(s.roomId, true);
-  pendingLocalKey = CryptoSystem.generateKey();
-  LOG.keys('Host: generated local key', pendingLocalKey.slice(0, 8) + '...');
+  setupPeerConnection(s.roomId, true/false);  
+pendingLocalKey = CryptoSystem.generateKey();  
+LOG.keys('Host/Guest: generated local key', pendingLocalKey.slice(0, 8) + '...');
 
   // Создаём контакт ДО отправки offer, чтобы onmessage мог сохранить remoteKey
   await upsertContact(s);
@@ -296,32 +296,22 @@ function setupPeerConnection(roomId, isHost) {
   teardownPeer();
 
   const config = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject',
-      },
-      {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject',
-      },
-      {
-        urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-        username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
-        credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo=',
-      },
-      {
-        urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
-        username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
-        credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo=',
-      },
-    ],
-    iceCandidatePoolSize: 10,
-  };
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    {
+      urls: 'turn:a.relay.metered.ca:80',
+      username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
+      credential: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6'
+    },
+    {
+      urls: 'turn:a.relay.metered.ca:443?transport=tcp',
+      username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
+      credential: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6'
+    }
+  ],
+  iceCandidatePoolSize: 10,
+};
 
   peerConnection = new RTCPeerConnection(config);
   LOG.webrtc('RTCPeerConnection created', { roomId, isHost, iceServers: config.iceServers.length });

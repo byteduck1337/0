@@ -1,21 +1,8 @@
-const WORD_LIST = ['Alpha','Bravo','Charlie','Delta','Echo','Foxtrot','Golf','Hotel','India','Juliett','Kilo','Lima','Mike','November','Oscar','Papa','Quebec','Romeo','Sierra','Tango','Uniform','Victor','Whiskey','Xray','Yankee','Zulu','Red','Blue','Green','Yellow','Orange','Purple','Silver','Gold','Crystal','Diamond','Ruby','Emerald','Sapphire','Jade','Onyx','Amber','Coral','Azure','Violet','Crimson','Indigo','Turquoise','Magenta','Olive','Maroon'];
-
 /* ======================================================================
-   ЦВЕТНОЕ ЛОГИРОВАНИЕ
+   ПОДКЛЮЧЕНИЕ ПО СЕКРЕТНОЙ ФРАЗЕ (добавлено к рабочему коду)
    ====================================================================== */
-const LOG = {
-  webrtc:  (...a) => console.log('%c[WebRTC]%c', 'color:#38bdf8;font-weight:bold', 'color:inherit', ...a),
-  signal:  (...a) => console.log('%c[Signal]%c', 'color:#fbbf24;font-weight:bold', 'color:inherit', ...a),
-  channel: (...a) => console.log('%c[Channel]%c', 'color:#10b981;font-weight:bold', 'color:inherit', ...a),
-  keys:    (...a) => console.log('%c[Keys]%c', 'color:#a78bfa;font-weight:bold', 'color:inherit', ...a),
-  phrase:  (...a) => console.log('%c[Phrase]%c', 'color:#fb923c;font-weight:bold', 'color:inherit', ...a),
-  error:   (...a) => console.error('%c[ERROR]%c', 'color:#ef4444;font-weight:bold', 'color:inherit', ...a),
-  warn:    (...a) => console.warn('%c[WARN]%c', 'color:#f59e0b;font-weight:bold', 'color:inherit', ...a),
-};
+const SIGNALING_URL_PHRASE = 'https://stable.okeysexsex.workers.dev';
 
-/* ======================================================================
-   СЕКРЕТНЫЕ ФРАЗЫ
-   ====================================================================== */
 const ADJ = [
   'быстрый','тихий','смелый','красный','синий','белый','чёрный','серый','ясный','тёплый',
   'холодный','летний','зимний','весенний','осенний','дикий','гордый','умный','добрый','строгий',
@@ -48,100 +35,52 @@ function normalizePhrase(raw) {
   return (raw || '').toLowerCase().replace(/[^a-zа-яё0-9]/g, '');
 }
 
-/* ======================================================================
-   СИГНАЛЬНЫЙ СЕРВЕР
-   ====================================================================== */
-const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
+let phraseSession = null;
 
-const SignalServer = {
-  async getOffer(roomId) {
-    LOG.signal('GET /offer', roomId);
-    try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${roomId}/offer`, { cache: 'no-store' });
-      LOG.signal('← offer', r.status);
-      return r.ok ? await r.json() : null;
-    } catch (e) {
-      LOG.error('getOffer failed:', e.message);
-      throw new Error('Сигнальный сервер недоступен: ' + e.message);
-    }
-  },
-  async getAnswer(roomId) {
-    try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${roomId}/answer`, { cache: 'no-store' });
-      return r.ok ? await r.json() : null;
-    } catch (e) { return null; }
-  },
-  async postOffer(roomId, sdp) {
-    LOG.signal('POST /offer', { roomId, sdpLen: sdp.length });
-    return fetch(`${SIGNALING_URL}/api/rooms/${roomId}/offer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp }),
-    });
-  },
-  async postAnswer(roomId, sdp) {
-    LOG.signal('POST /answer', { roomId, sdpLen: sdp.length });
-    return fetch(`${SIGNALING_URL}/api/rooms/${roomId}/answer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp }),
-    });
-  },
-  closeRoom(roomId) {
-    fetch(`${SIGNALING_URL}/api/rooms/${roomId}/close`, { method: 'POST' }).catch(() => {});
-  },
-};
-
-/* ======================================================================
-   ПОДКЛЮЧЕНИЕ ПО СЕКРЕТНОЙ ФРАЗЕ
-   ====================================================================== */
-let phraseSession = null; // { roomId, role, aborted, timer }
-
-async function connectByPhrase(rawPhrase) {
+async function connect(rawPhrase) {
   const clean = (rawPhrase || '').trim();
   const norm = normalizePhrase(clean);
-  LOG.phrase('connectByPhrase:', { raw: clean, normalized: norm });
-
   if (norm.length < 5) throw new Error('Фраза слишком короткая (минимум 5 символов)');
 
   const roomId = (await CryptoSystem.sha256(norm)).slice(0, 16);
-  LOG.phrase('roomId:', roomId);
+  console.log('[Phrase] connect:', { raw: clean, roomId });
 
   // Отменяем предыдущую сессию
   cancelPhraseSession(true);
-
   phraseSession = { roomId, role: null, aborted: false, timer: null };
 
   UI.setConnectStage && UI.setConnectStage('checking');
 
+  // Проверяем, есть ли уже offer на сервере
   let existingOffer = null;
   try {
-    existingOffer = await SignalServer.getOffer(roomId);
+    const r = await fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${roomId}/offer`, { cache: 'no-store' });
+    if (r.ok) existingOffer = await r.json();
   } catch (e) {
-    LOG.error('connectByPhrase getOffer error:', e);
+    console.error('[Phrase] getOffer failed:', e);
     cancelPhraseSession();
-    throw e;
+    throw new Error('Сигнальный сервер недоступен: ' + e.message);
   }
   if (phraseSession.aborted) return;
 
   if (existingOffer && existingOffer.sdp) {
-    LOG.phrase('Offer exists → joining as GUEST');
+    console.log('[Phrase] Offer exists → GUEST');
     await phraseJoinAsGuest(roomId, existingOffer);
   } else {
-    LOG.phrase('No offer → starting as HOST');
+    console.log('[Phrase] No offer → HOST');
     await phraseStartAsHost(roomId);
   }
 }
 
 async function phraseStartAsHost(roomId) {
   phraseSession.role = 'host';
-
-  // Генерируем ключ и создаём соединение (используем ваш рабочий setupPeerConnectionForHost)
   connectedPeerId = roomId;
   pendingLocalKey = CryptoSystem.generateKey();
+
   if (!contacts[roomId]) contacts[roomId] = { name: roomId.slice(0, 8), avatar: '' };
   contacts[roomId].localSessionKey = pendingLocalKey;
   contacts[roomId].role = 'host';
+  contacts[roomId].phrase = roomId;
   await saveContactsSecure();
 
   // Используем ВАШ рабочий setupPeerConnectionForHost
@@ -151,46 +90,44 @@ async function phraseStartAsHost(roomId) {
   await peerConnection.setLocalDescription(offer);
   await waitForIceGathering();
 
-  LOG.phrase('Posting offer to signaling server');
-  const res = await SignalServer.postOffer(roomId, peerConnection.localDescription.sdp);
+  console.log('[Phrase] Posting offer...');
+  const res = await fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${roomId}/offer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: peerConnection.localDescription.sdp }),
+  });
 
   if (res.status === 409) {
-    // Кто-то стал хостом раньше — переключаемся на гостя
-    LOG.phrase('Conflict 409 → switching to GUEST');
-    const theirOffer = await SignalServer.getOffer(roomId);
+    console.log('[Phrase] Conflict 409 → switching to GUEST');
+    const r2 = await fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${roomId}/offer`, { cache: 'no-store' });
+    const theirOffer = r2.ok ? await r2.json() : null;
     if (!theirOffer || !theirOffer.sdp) throw new Error('Не удалось подключиться');
     await phraseJoinAsGuest(roomId, theirOffer);
     return;
   }
 
-  LOG.phrase('Offer posted, waiting for answer...');
+  console.log('[Phrase] Offer posted, waiting for answer...');
   UI.setConnectStage && UI.setConnectStage('waiting');
-
-  // Показываем фразу для диктовки
-  if (UI.showPhraseForDictation) {
-    UI.showPhraseForDictation(phraseSession.roomId);
-  }
 
   phraseSession.timer = setTimeout(() => {
     cancelPhraseSession();
     alert('Время ожидания истекло (5 минут)');
   }, 5 * 60 * 1000);
 
-  // Polling ответа
   const poll = async () => {
-    if (phraseSession.aborted || phraseSession !== phraseSession) return;
-    const ans = await SignalServer.getAnswer(roomId);
-    if (ans && ans.sdp) {
-      LOG.phrase('Answer received!');
-      try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(ans));
-        LOG.phrase('Remote description set, waiting for connection...');
-      } catch (e) {
-        LOG.error('setRemoteDescription(answer) failed:', e);
+    if (!phraseSession || phraseSession.aborted) return;
+    try {
+      const r = await fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${roomId}/answer`, { cache: 'no-store' });
+      if (r.ok) {
+        const ans = await r.json();
+        if (ans && ans.sdp) {
+          console.log('[Phrase] Answer received!');
+          await peerConnection.setRemoteDescription(new RTCSessionDescription(ans));
+          return; // stop polling
+        }
       }
-    } else {
-      setTimeout(poll, 1500);
-    }
+    } catch (e) { /* retry */ }
+    setTimeout(poll, 1500);
   };
   poll();
 }
@@ -201,9 +138,11 @@ async function phraseJoinAsGuest(roomId, offerData) {
 
   connectedPeerId = roomId;
   pendingLocalKey = CryptoSystem.generateKey();
+
   if (!contacts[roomId]) contacts[roomId] = { name: roomId.slice(0, 8), avatar: '' };
   contacts[roomId].localSessionKey = pendingLocalKey;
   contacts[roomId].role = 'guest';
+  contacts[roomId].phrase = roomId;
   await saveContactsSecure();
 
   // Создаём PeerConnection как гость (ваш рабочий паттерн из joinSubmitOffer)
@@ -215,28 +154,32 @@ async function phraseJoinAsGuest(roomId, offerData) {
   peerConnection = new RTCPeerConnection(config);
 
   peerConnection.ondatachannel = async (event) => {
-    LOG.channel('DataChannel received from host');
+    console.log('[Phrase] DataChannel received from host');
     dataChannel = event.channel;
     setupDataChannel(roomId, 'guest');
   };
 
   peerConnection.oniceconnectionstatechange = () => updateOnlineStatus();
   peerConnection.onconnectionstatechange = () => {
-    LOG.webrtc('Guest connection state:', peerConnection.connectionState);
+    console.log('[Phrase] Guest connection state:', peerConnection.connectionState);
     if (peerConnection.connectionState === 'connected') updateOnlineStatus();
   };
 
-  LOG.phrase('Setting remote offer');
+  console.log('[Phrase] Setting remote offer');
   await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData));
 
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
   await waitForIceGathering();
 
-  LOG.phrase('Posting answer to signaling server');
-  await SignalServer.postAnswer(roomId, peerConnection.localDescription.sdp);
+  console.log('[Phrase] Posting answer...');
+  await fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${roomId}/answer`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sdp: peerConnection.localDescription.sdp }),
+  });
 
-  LOG.phrase('Answer posted, waiting for WebRTC handshake...');
+  console.log('[Phrase] Answer posted, waiting for WebRTC handshake...');
 
   phraseSession.timer = setTimeout(() => {
     cancelPhraseSession();
@@ -246,15 +189,14 @@ async function phraseJoinAsGuest(roomId, offerData) {
 
 function cancelPhraseSession(silent = false) {
   if (phraseSession) {
-    LOG.phrase('cancelPhraseSession', { role: phraseSession.role });
     phraseSession.aborted = true;
     if (phraseSession.timer) clearTimeout(phraseSession.timer);
-    if (phraseSession.role === 'host') SignalServer.closeRoom(phraseSession.roomId);
+    if (phraseSession.role === 'host') {
+      fetch(`${SIGNALING_URL_PHRASE}/api/rooms/${phraseSession.roomId}/close`, { method: 'POST' }).catch(() => {});
+    }
   }
   phraseSession = null;
-  if (!silent) {
-    UI.setConnectStage && UI.setConnectStage('idle');
-  }
+  if (!silent) UI.setConnectStage && UI.setConnectStage('idle');
 }
 
 /* ======================================================================
@@ -718,10 +660,9 @@ window.WebRTC = {
   loadHistory: loadMessageHistory,
   saveContacts: saveContactsSecure,
   getState: () => ({ contacts, activePeer, currentUser, masterPassword, dataChannel, peerConnection }),
-  // Новые функции для подключения по фразе
-  connectByPhrase,
+  connect,
   generatePhrase,
-  cancelPhraseSession,
+  cancelConnect: cancelPhraseSession,
 };
 
 console.log('%c[DEBUG] /0byte/ ready. WebRTC.connectByPhrase("фраза") для подключения по секретной фразе.', 'color:#38bdf8;font-weight:bold');

@@ -186,7 +186,11 @@ async function joinAsGuest(s, offerData) {
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest: generated local key', pendingLocalKey.slice(0, 8) + '...');
   setupPeerConnection(s.roomId, false);
-
+   peerConnection.onicecandidate = (e) => {
+  if (e.candidate) {
+    LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address);
+  }
+};
   LOG.webrtc('Setting remote offer');
   await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
   const answer = await peerConnection.createAnswer();

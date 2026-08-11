@@ -1,10 +1,4 @@
-/* ================================================================
-   /0byte/ Mesh — WebRTC P2P Layer
-   TURN (из new.js) + Signaling Server + Secret Phrases
-   Написано с нуля. Без QR, без ручного SDP, без fingerprint.
-   ================================================================ */
 
-// ===================== КОНФИГУРАЦИЯ =====================
 const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
 const ICE_CONFIG = {

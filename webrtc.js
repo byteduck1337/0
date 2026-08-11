@@ -259,7 +259,22 @@ async function reconnect(peerId) {
    ====================================================================== */
 function setupPeerConnection(roomId, isHost) {
   teardownPeer();
-  const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  const config = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    // Бесплатный публичный TURN для тестирования
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
+  ]
+};
   peerConnection = new RTCPeerConnection(config);
   LOG.webrtc('RTCPeerConnection created', { roomId, isHost });
 

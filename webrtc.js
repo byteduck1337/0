@@ -62,37 +62,55 @@ const Signal = {
   async getOffer(id) {
     LOG.signal('GET /offer', { roomId: id });
     try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, { cache: 'no-store' });
+      const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
       LOG.signal('← offer', r.status);
       return r.ok ? await r.json() : null;
-    } catch (e) { LOG.error('getOffer failed:', e); return null; }
+    } catch (e) {
+      LOG.error('getOffer FAILED:', e.name, e.message);
+      throw new Error(`Сигнальный сервер недоступен (${e.name}). Проверьте интернет.`);
+    }
   },
+
   async getAnswer(id) {
     try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/answer`, { cache: 'no-store' });
+      const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/answer`, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
       return r.ok ? await r.json() : null;
-    } catch (e) { return null; }
+    } catch (e) {
+      LOG.warn('getAnswer failed:', e.message);
+      return null;
+    }
   },
+
   async postOffer(id, sdp) {
     LOG.signal('POST /offer', { roomId: id, sdpLen: sdp.length });
     const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/offer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sdp }),
+      signal: AbortSignal.timeout(8000),
     });
     LOG.signal('← offer result', r.status);
     return r;
   },
+
   async postAnswer(id, sdp) {
     LOG.signal('POST /answer', { roomId: id, sdpLen: sdp.length });
     const r = await fetch(`${SIGNALING_URL}/api/rooms/${id}/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sdp }),
+      signal: AbortSignal.timeout(8000),
     });
     LOG.signal('← answer result', r.status);
     return r;
   },
+
   closeRoom(id) {
     LOG.signal('CLOSE room', id);
     fetch(`${SIGNALING_URL}/api/rooms/${id}/close`, { method: 'POST' }).catch(() => {});
@@ -122,10 +140,18 @@ async function connect(rawPhrase) {
   };
 
   UI.setConnectStage('checking');
-  const existing = await Signal.getOffer(roomId);
-  if (session.aborted) return;
 
-  if (existing) {
+let existing = null;
+try {
+  existing = await Signal.getOffer(roomId);
+} catch (e) {
+  LOG.error('connect() getOffer error:', e);
+  failConnect(e.message);
+  return;
+}
+if (session.aborted) return;
+
+if (existing) {
     LOG.webrtc('Existing offer found → joining as GUEST');
     await joinAsGuest(session, existing);
   } else {
@@ -263,35 +289,48 @@ async function reconnect(peerId) {
    ====================================================================== */
 function setupPeerConnection(roomId, isHost) {
   teardownPeer();
+
   const config = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    // Запасной TURN
-    {
-      urls: 'turn:global.turn.twilio.com:3478?transport=udp',
-      username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
-      credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo='
-    }
-  ]
-};
+    iceServers: [
+      // STUN (базовый)
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+
+      // TURN #1 — OpenRelay Metered (бесплатный, работает без регистрации)
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+
+      // TURN #2 — Twilio (надёжный fallback)
+      {
+        urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+        username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
+        credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo=',
+      },
+      {
+        urls: 'turn:global.turn.twilio.com:3478?transport=tcp',
+        username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
+        credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo=',
+      },
+    ],
+    iceCandidatePoolSize: 10,
+  };
+
   peerConnection = new RTCPeerConnection(config);
-  LOG.webrtc('RTCPeerConnection created', { roomId, isHost });
+  LOG.webrtc('RTCPeerConnection created', { roomId, isHost, iceServers: config.iceServers.length });
 
   peerConnection.oniceconnectionstatechange = () => {
     LOG.webrtc('ICE state:', peerConnection.iceConnectionState);
     UI.updateStatus();
   };
+
   peerConnection.onconnectionstatechange = () => {
     if (!peerConnection) return;
     const st = peerConnection.connectionState;
@@ -300,6 +339,13 @@ function setupPeerConnection(roomId, isHost) {
     if (st === 'connected') onLinkEstablished();
     if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
       failConnect('Не удалось установить соединение (state=' + st + ')');
+    }
+  };
+
+  // Логирование ICE-кандидатов для диагностики
+  peerConnection.onicecandidate = (e) => {
+    if (e.candidate) {
+      LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address);
     }
   };
 

@@ -2,6 +2,7 @@ const UI_LOG = {
   info: (...args) => console.log('%c[UI]', 'color: #06b6d4; font-weight: bold', ...args),
   error: (...args) => console.error('%c[UI Error]', 'color: #ef4444; font-weight: bold', ...args),
 };
+
 const UI = {
   init: () => {
     UI.loadTheme();
@@ -90,7 +91,6 @@ const UI = {
     } else {
       contacts = JSON.parse(localStorage.getItem('contacts') || '{}');
     }
-    // миграция со старого формата ключей
     for (const c of Object.values(contacts)) {
       if (!c.localKeys) c.localKeys = c.localSessionKey ? [c.localSessionKey] : [];
       if (!c.remoteKeys) c.remoteKeys = c.remoteKey ? [c.remoteKey] : [];
@@ -138,6 +138,7 @@ const UI = {
   },
 
   openChat: (id) => {
+    UI_LOG.info('Opening chat:', id);
     activePeer = id;
     localStorage.setItem('activePeer', id);
     if (contacts[id]) contacts[id].unread = 0;
@@ -149,7 +150,7 @@ const UI = {
     UI.updateStatus();
     UI.loadMessages(id);
     UI.renderContacts();
-    setTimeout(() => document.getElementById('message-input').focus(), 100);
+    setTimeout(() => document.getElementById('message-input')?.focus(), 100);
   },
 
   updateStatus: () => {
@@ -169,7 +170,7 @@ const UI = {
     }
   },
 
-   loadMessages: async (id) => {
+  loadMessages: async (id) => {
     UI_LOG.info('Loading messages for:', id);
     const container = document.getElementById('messages-container');
     if (!container) {
@@ -179,58 +180,57 @@ const UI = {
     container.innerHTML = '';
     const history = await window.WebRTC.loadHistory(id);
     UI_LOG.info('History loaded:', history.length, 'messages');
-    
+
     const state = window.WebRTC.getState();
-    const localKey = contacts[id]?.localSessionKey;
-    const remoteKey = contacts[id]?.remoteKey;
-    UI_LOG.info('Keys available:', { localKey: !!localKey, remoteKey: !!remoteKey });
-    
-    for (const msg of history) {
-      const isMine = msg.from === state.currentUser;
-      const div = document.createElement('div');
-      div.className = `message ${isMine ? 'mine' : 'other'}`;
-      let content = '🔒 Encrypted';
-      const key = isMine ? remoteKey : localKey;
-      
-      if (msg.type === 'image') {
-        if (key && msg.ciphertext) {
-          const buf = await CryptoSystem.decryptData(msg.ciphertext, key);
-          if (buf) {
-            const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
-            content = `<img src="${url}" onclick="UI.openLightbox('${url}')">`;
-          } else {
-            UI_LOG.error('Failed to decrypt image');
-          }
-        }
-      } else {
-        if (key && msg.ciphertext) {
-          const txt = await CryptoSystem.decrypt(msg.ciphertext, key);
-          if (txt) {
-            content = txt;
-          } else {
-            UI_LOG.error('Failed to decrypt message');
-          }
-        }
-      }
-      div.innerHTML = `<div>${content}</div><span class="message-time">${new Date(msg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>`;
-      container.appendChild(div);
-    }
-    container.scrollTop = container.scrollHeight;
-  },
-  
-  openChat: (id) => {
-    UI_LOG.info('Opening chat:', id);
-    activePeer = id;
-    localStorage.setItem('activePeer', id);
-    document.getElementById('sidebar').classList.add('hidden-mobile');
-    document.getElementById('main-chat').classList.remove('hidden');
     const c = contacts[id] || {};
-    document.getElementById('chat-name').textContent = c.name || id.slice(0,6);
-    document.getElementById('chat-avatar').innerHTML = c.avatar || '<svg class="icon"><use href="#icon-user"></use></svg>';
-    UI_LOG.info('Contact data:', { name: c.name, hasLocalKey: !!c.localSessionKey, hasRemoteKey: !!c.remoteKey });
-    UI.updateStatus();
-    UI.loadMessages(id);
-    UI.renderContacts();
+    const myKeys = [...(c.remoteKeys || [])].reverse();
+    const theirKeys = [...(c.localKeys || [])].reverse();
+
+    const tryDecrypt = async (ciphertext, keys, isData) => {
+      for (const k of keys) {
+        const res = isData ? await CryptoSystem.decryptData(ciphertext, k)
+                           : await CryptoSystem.decrypt(ciphertext, k);
+        if (res) return res;
+      }
+      return null;
+    };
+
+    for (const msg of history) {
+      const mine = msg.from === state.currentUser;
+      const keys = mine ? myKeys : theirKeys;
+      const row = document.createElement('div');
+      row.className = 'message ' + (mine ? 'mine' : 'other');
+      const body = document.createElement('div');
+      body.className = 'msg-body';
+      let ok = false;
+
+      if (msg.type === 'image' && msg.ciphertext) {
+        const buf = await tryDecrypt(msg.ciphertext, keys, true);
+        if (buf) {
+          const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
+          const img = document.createElement('img');
+          img.src = url; img.loading = 'lazy';
+          img.onclick = () => UI.openLightbox(url);
+          body.appendChild(img); ok = true;
+        }
+      } else if (msg.ciphertext) {
+        const text = await tryDecrypt(msg.ciphertext, keys, false);
+        if (text) { body.textContent = text; ok = true; }
+      }
+
+      if (!ok) {
+        body.classList.add('locked');
+        body.innerHTML = '<svg class="icon sm"><use href="#i-lock"></use></svg><span>Не расшифровано</span>';
+      }
+
+      const time = document.createElement('span');
+      time.className = 'msg-time';
+      time.textContent = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      row.appendChild(body);
+      row.appendChild(time);
+      container.appendChild(row);
+    }
+    requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
   },
 
   /* ---------- новое соединение ---------- */
@@ -331,7 +331,7 @@ const UI = {
   toggleSendBtn: () => {
     const btn = document.getElementById('send-btn');
     const inp = document.getElementById('message-input');
-    btn.disabled = inp.value.trim().length === 0;
+    if (btn && inp) btn.disabled = inp.value.trim().length === 0;
   },
 
   loadTheme: () => {
@@ -364,7 +364,6 @@ const UI = {
       };
     });
 
-    /* новая сессия */
     document.getElementById('btn-gen-phrase').onclick = () => {
       const input = document.getElementById('phrase-input');
       input.value = window.WebRTC.generatePhrase();
@@ -381,7 +380,6 @@ const UI = {
       UI.copyText(document.getElementById('ns-phrase').textContent);
     };
 
-    /* настройки */
     document.getElementById('settings-btn').onclick = () => {
       document.getElementById('set-name').value = myName;
       document.getElementById('uid-display').textContent = currentUser || '—';
@@ -400,19 +398,19 @@ const UI = {
       }
     };
 
-    /* поиск */
     document.getElementById('search-input').addEventListener('input', UI.renderContacts);
 
-    /* композер */
     const inp = document.getElementById('message-input');
-    inp.addEventListener('input', function () {
-      this.style.height = 'auto';
-      this.style.height = Math.min(this.scrollHeight, 120) + 'px';
-      UI.toggleSendBtn();
-    });
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.WebRTC.sendMessage(); }
-    });
+    if (inp) {
+      inp.addEventListener('input', function () {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 120) + 'px';
+        UI.toggleSendBtn();
+      });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); window.WebRTC.sendMessage(); }
+      });
+    }
     document.getElementById('send-btn').onclick = window.WebRTC.sendMessage;
     document.getElementById('attach-btn').onclick = () => document.getElementById('file-input').click();
     document.getElementById('file-input').onchange = e => {
@@ -420,7 +418,6 @@ const UI = {
       e.target.value = '';
     };
 
-    /* переподключение и навигация */
     document.getElementById('btn-reconnect').onclick = () => {
       if (activePeer) window.WebRTC.reconnect(activePeer);
     };

@@ -410,15 +410,21 @@ async function waitForIce() {
    ====================================================================== */
 async function upsertContact(s) {
   const prev = contacts[s.roomId] || {};
-  const updated = {
+const oldLocalKeys = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
+const oldRemoteKeys = prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []);
+const newLocalKeys = pendingLocalKey && !oldLocalKeys.includes(pendingLocalKey)
+    ? [...oldLocalKeys, pendingLocalKey]
+    : oldLocalKeys;
+
+const updated = {
     ...prev,
     name: prev.name || s.display,
     phrase: s.phrase,
     display: s.display,
     role: s.role,
-    localKeys: prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []),
-    remoteKeys: prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []),
-  };
+    localKeys: newLocalKeys,
+    remoteKeys: oldRemoteKeys, // remoteKeys обновляются только через onmessage
+};
   if (pendingLocalKey && !updated.localKeys.includes(pendingLocalKey)) {
     updated.localKeys.push(pendingLocalKey);
   }

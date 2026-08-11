@@ -56,7 +56,7 @@ function normalizePhrase(raw) {
 }
 
 /* ======================================================================
-   СИГНАЛЬНЫЙ СЕРВЕР (с логами)
+   СИГНАЛЬНЫЙ СЕРВЕР
    ====================================================================== */
 const Signal = {
   async getOffer(id) {
@@ -141,17 +141,18 @@ async function connect(rawPhrase) {
 
   UI.setConnectStage('checking');
 
-let existing = null;
-try {
-  existing = await Signal.getOffer(roomId);
-} catch (e) {
-  LOG.error('connect() getOffer error:', e);
-  failConnect(e.message);
-  return;
-}
-if (session.aborted) return;
+  // Проверяем доступность сервера и получаем offer с обработкой ошибок
+  let existing = null;
+  try {
+    existing = await Signal.getOffer(roomId);
+  } catch (e) {
+    LOG.error('connect() getOffer error:', e);
+    failConnect(e.message);
+    return;
+  }
+  if (session.aborted) return;
 
-if (existing) {
+  if (existing) {
     LOG.webrtc('Existing offer found → joining as GUEST');
     await joinAsGuest(session, existing);
   } else {
@@ -162,9 +163,14 @@ if (existing) {
 
 async function tryHost(s) {
   s.role = 'host';
+
+  // ВАЖНО: сначала создаём канал (teardownPeer обнулит старое), потом генерируем ключ
+  setupPeerConnection(s.roomId, true);
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Host: generated local key', pendingLocalKey.slice(0, 8) + '...');
-  setupPeerConnection(s.roomId, true);
+
+  // Создаём контакт ДО отправки offer, чтобы onmessage мог сохранить remoteKey
+  await upsertContact(s);
 
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
@@ -185,7 +191,6 @@ async function tryHost(s) {
     return joinAsGuest(s, theirOffer);
   }
 
-  await upsertContact(s);
   UI.setConnectStage('waiting');
   LOG.webrtc('Host: waiting for answer...');
 
@@ -209,14 +214,15 @@ async function tryHost(s) {
 async function joinAsGuest(s, offerData) {
   s.role = 'guest';
   UI.setConnectStage('linking');
+
+  // ВАЖНО: сначала создаём канал (teardownPeer обнулит старое), потом генерируем ключ
+  setupPeerConnection(s.roomId, false);
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest: generated local key', pendingLocalKey.slice(0, 8) + '...');
-  setupPeerConnection(s.roomId, false);
-   peerConnection.onicecandidate = (e) => {
-  if (e.candidate) {
-    LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address);
-  }
-};
+
+  // Создаём контакт ДО установки remote description, чтобы onmessage мог сохранить remoteKey
+  await upsertContact(s);
+
   LOG.webrtc('Setting remote offer');
   await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
   const answer = await peerConnection.createAnswer();
@@ -225,7 +231,6 @@ async function joinAsGuest(s, offerData) {
   if (s.aborted) return;
 
   await Signal.postAnswer(s.roomId, peerConnection.localDescription.sdp);
-  await upsertContact(s);
   LOG.webrtc('Guest: answer posted, waiting for WebRTC handshake');
 
   s.timer = setTimeout(() => failConnect('Узел не отвечает'), 90 * 1000);
@@ -285,18 +290,15 @@ async function reconnect(peerId) {
 }
 
 /* ======================================================================
-   WEBRTC / DATACHANNEL (с подробным логированием)
+   WEBRTC / DATACHANNEL
    ====================================================================== */
 function setupPeerConnection(roomId, isHost) {
   teardownPeer();
 
   const config = {
     iceServers: [
-      // STUN (базовый)
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-
-      // TURN #1 — OpenRelay Metered (бесплатный, работает без регистрации)
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
@@ -307,8 +309,6 @@ function setupPeerConnection(roomId, isHost) {
         username: 'openrelayproject',
         credential: 'openrelayproject',
       },
-
-      // TURN #2 — Twilio (надёжный fallback)
       {
         urls: 'turn:global.turn.twilio.com:3478?transport=udp',
         username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
@@ -342,7 +342,6 @@ function setupPeerConnection(roomId, isHost) {
     }
   };
 
-  // Логирование ICE-кандидатов для диагностики
   peerConnection.onicecandidate = (e) => {
     if (e.candidate) {
       LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address);
@@ -367,9 +366,18 @@ function setupDataChannel(roomId) {
   LOG.channel('setupDataChannel for roomId:', roomId);
 
   const sendKey = () => {
+    LOG.keys('sendKey() check', {
+      readyState: dataChannel?.readyState,
+      hasKey: !!pendingLocalKey,
+    });
     if (dataChannel && dataChannel.readyState === 'open' && pendingLocalKey) {
       LOG.keys('⬆ sending local key to peer', pendingLocalKey.slice(0, 8) + '...');
       dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
+    } else {
+      LOG.warn('sendKey() skipped:', {
+        channelOpen: dataChannel?.readyState === 'open',
+        hasKey: !!pendingLocalKey,
+      });
     }
   };
 
@@ -420,7 +428,19 @@ function setupDataChannel(roomId) {
           LOG.keys('⬆ sending key_ack');
           dataChannel.send(JSON.stringify({ type: 'key_ack' }));
         } else {
-          LOG.warn('Contact not found for roomId:', roomId);
+          LOG.warn('Contact not found for roomId:', roomId, '— creating emergency contact');
+          // Экстренное создание контакта, если он по какой-то причине отсутствует
+          contacts[roomId] = {
+            name: roomId.slice(0, 8),
+            phrase: '',
+            display: roomId.slice(0, 8).toUpperCase(),
+            role: 'unknown',
+            localKeys: [],
+            remoteKeys: [msg.key],
+          };
+          await saveContacts();
+          if (activePeer === roomId) UI.loadMessages(roomId);
+          dataChannel.send(JSON.stringify({ type: 'key_ack' }));
         }
       } else if (msg.type === 'key_ack') {
         LOG.keys('Received key_ack — stopping key broadcast');
@@ -448,11 +468,9 @@ async function waitForIce() {
     LOG.webrtc('waitForIce() already complete');
     return;
   }
-
   return new Promise(resolve => {
-    const timeout = 10_000; // 10 секунд
+    const timeout = 10000;
     let resolved = false;
-
     const doResolve = (reason) => {
       if (resolved) return;
       resolved = true;
@@ -461,15 +479,12 @@ async function waitForIce() {
       clearTimeout(timer);
       resolve();
     };
-
     const onStateChange = () => {
       if (peerConnection.iceGatheringState === 'complete') {
         doResolve('gathering complete');
       }
     };
-
     peerConnection.addEventListener('icegatheringstatechange', onStateChange);
-
     const timer = setTimeout(() => {
       LOG.warn(`waitForIce() timeout after ${timeout / 1000}s`);
       doResolve('timeout');
@@ -482,24 +497,22 @@ async function waitForIce() {
    ====================================================================== */
 async function upsertContact(s) {
   const prev = contacts[s.roomId] || {};
-const oldLocalKeys = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
-const oldRemoteKeys = prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []);
-const newLocalKeys = pendingLocalKey && !oldLocalKeys.includes(pendingLocalKey)
+  const oldLocalKeys = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
+  const oldRemoteKeys = prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []);
+  const newLocalKeys = pendingLocalKey && !oldLocalKeys.includes(pendingLocalKey)
     ? [...oldLocalKeys, pendingLocalKey]
     : oldLocalKeys;
 
-const updated = {
+  const updated = {
     ...prev,
     name: prev.name || s.display,
     phrase: s.phrase,
     display: s.display,
     role: s.role,
     localKeys: newLocalKeys,
-    remoteKeys: oldRemoteKeys, // remoteKeys обновляются только через onmessage
-};
-  if (pendingLocalKey && !updated.localKeys.includes(pendingLocalKey)) {
-    updated.localKeys.push(pendingLocalKey);
-  }
+    remoteKeys: oldRemoteKeys,
+  };
+
   const ordered = { [s.roomId]: updated };
   for (const [k, v] of Object.entries(contacts)) if (k !== s.roomId) ordered[k] = v;
   contacts = ordered;
@@ -512,7 +525,7 @@ const updated = {
 }
 
 /* ======================================================================
-   ОТПРАВКА СООБЩЕНИЙ (С ДЕТАЛЬНЫМ ЛОГИРОВАНИЕМ)
+   ОТПРАВКА СООБЩЕНИЙ
    ====================================================================== */
 async function sendMessage() {
   const input = document.getElementById('message-input');
@@ -520,45 +533,36 @@ async function sendMessage() {
 
   LOG.send('sendMessage() called', { textLen: text.length, activePeer, hasChannel: !!dataChannel });
 
-  // Проверка 1: текст не пустой
   if (!text) {
     LOG.warn('sendMessage() rejected: empty text');
     return;
   }
-
-  // Проверка 2: есть активный пир
   if (!activePeer) {
     LOG.error('sendMessage() rejected: no activePeer');
     UI.toast('Нет активного соединения', 'error');
     return;
   }
-
-  // Проверка 3: канал существует
   if (!dataChannel) {
     LOG.error('sendMessage() rejected: no dataChannel');
     UI.toast('Канал не создан', 'error');
     return;
   }
-
-  // Проверка 4: канал в состоянии open
   if (dataChannel.readyState !== 'open') {
     LOG.error('sendMessage() rejected: channel state =', dataChannel.readyState);
     UI.toast('Канал не открыт (state=' + dataChannel.readyState + ')', 'error');
     return;
   }
 
-  // Проверка 5: контакт существует
   const contact = contacts[activePeer];
   if (!contact) {
     LOG.error('sendMessage() rejected: contact not found for', activePeer);
     return;
   }
 
-  // Проверка 6: remoteKeys не пустой
   const keys = contact.remoteKeys || [];
   LOG.keys('remoteKeys for activePeer:', keys.length, 'keys');
   if (keys.length === 0) {
-    LOG.error('sendMessage() rejected: NO REMOTE KEYS — ключ от собеседника не получен');
+    LOG.error('sendMessage() rejected: NO REMOTE KEYS');
     UI.toast('Ожидание обмена ключами... подождите 2-3 секунды', 'error');
     return;
   }
@@ -654,7 +658,7 @@ async function saveContacts() {
 }
 
 /* ======================================================================
-   ОТЛАДОЧНЫЕ КОМАНДЫ (вызываются из консоли)
+   ОТЛАДОЧНЫЕ КОМАНДЫ
    ====================================================================== */
 window.debug = {
   dump: () => {
@@ -672,7 +676,6 @@ window.debug = {
       localKeys: (c.localKeys || []).length,
       remoteKeys: (c.remoteKeys || []).length,
     })));
-
     if (s.activePeer && s.contacts[s.activePeer]) {
       const c = s.contacts[s.activePeer];
       console.log('%c--- Active peer details ---', 'color:#a78bfa;font-weight:bold');

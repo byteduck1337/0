@@ -262,6 +262,7 @@ function setupPeerConnection(roomId, isHost) {
   const config = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
     {
       urls: 'turn:openrelay.metered.ca:80',
       username: 'openrelayproject',
@@ -271,6 +272,12 @@ function setupPeerConnection(roomId, isHost) {
       urls: 'turn:openrelay.metered.ca:443?transport=tcp',
       username: 'openrelayproject',
       credential: 'openrelayproject'
+    },
+    // Запасной TURN
+    {
+      urls: 'turn:global.turn.twilio.com:3478?transport=udp',
+      username: 'f4b4035eaa76f4a55de5f4351567653ee4ff6fa97b50b6b334fcc1be9c27212d',
+      credential: 'w1WqK2FpF/p+2wDq2XJ1i1QnJmAOdCHnPfMHOOz+6Zo='
     }
   ]
 };
@@ -386,22 +393,37 @@ function setupDataChannel(roomId) {
 
 async function waitForIce() {
   LOG.webrtc('waitForIce() start');
+  if (!peerConnection) return;
+  if (peerConnection.iceGatheringState === 'complete') {
+    LOG.webrtc('waitForIce() already complete');
+    return;
+  }
+
   return new Promise(resolve => {
-    if (!peerConnection) return resolve();
-    if (peerConnection.iceGatheringState === 'complete') {
-      LOG.webrtc('waitForIce() already complete');
-      return resolve();
-    }
-    peerConnection.onicegatheringstatechange = () => {
+    const timeout = 10_000; // 10 секунд
+    let resolved = false;
+
+    const doResolve = (reason) => {
+      if (resolved) return;
+      resolved = true;
+      LOG.webrtc(`waitForIce() done (${reason})`);
+      peerConnection.removeEventListener('icegatheringstatechange', onStateChange);
+      clearTimeout(timer);
+      resolve();
+    };
+
+    const onStateChange = () => {
       if (peerConnection.iceGatheringState === 'complete') {
-        LOG.webrtc('waitForIce() complete');
-        resolve();
+        doResolve('gathering complete');
       }
     };
-    setTimeout(() => {
-      LOG.warn('waitForIce() timeout (3s)');
-      resolve();
-    }, 3000);
+
+    peerConnection.addEventListener('icegatheringstatechange', onStateChange);
+
+    const timer = setTimeout(() => {
+      LOG.warn(`waitForIce() timeout after ${timeout / 1000}s`);
+      doResolve('timeout');
+    }, timeout);
   });
 }
 

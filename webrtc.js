@@ -362,11 +362,14 @@ function _setupDataChannel(roomId) {
 
 function _onConnected() {
   if (!session) return;
-  LOG.webrtc('✅ LINK ESTABLISHED', { roomId: session.roomId, role: session.role });
+  const roomId = session.roomId; // ← берём из session, а не из activePeer
+  LOG.webrtc('✅ LINK ESTABLISHED', { roomId, role: session.role });
   if (session.timer) clearTimeout(session.timer);
-  if (session.role === 'host') Signal.closeRoom(session.roomId);
+  if (session.role === 'host') Signal.closeRoom(roomId);
   session = null;
-  if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(activePeer);
+  activePeer = roomId;
+  localStorage.setItem('activePeer', roomId);
+  if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
 }
 
 function _teardownPeer() {

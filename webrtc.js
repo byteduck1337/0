@@ -1,11 +1,11 @@
 const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
-// ===================== ICE КОНФИГУРАЦИЯ =====================
+// ===================== ICE КОНФИГУРАЦИЯ (TURN + STUN) =====================
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' },
+    // РАБОЧИЙ TURN из old.js
     {
       urls: 'turn:a.relay.metered.ca:80',
       username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
@@ -31,7 +31,7 @@ let peerConnection = null;
 let dataChannel = null;
 let pendingLocalKey = null;
 let keySendInterval = null;
-let session = null;
+let session = null; // { roomId, phrase, display, role, aborted, timer }
 
 // ===================== ЛОГИРОВАНИЕ =====================
 const LOG = {
@@ -133,7 +133,7 @@ async function connect(rawPhrase) {
     cancelConnect();
     throw e;
   }
-  if (session.aborted) return;
+  if (!session || session.aborted) return;
 
   if (existing && existing.sdp) {
     LOG.webrtc('Offer found → GUEST');
@@ -145,19 +145,25 @@ async function connect(rawPhrase) {
 }
 
 async function _startAsHost(roomId) {
+  if (!session) return;
   session.role = 'host';
 
+  // 1. Создаём PeerConnection ПЕРВЫМ
   _createPeerConnection(roomId, true);
 
+  // 2. Генерируем ключ ПОСЛЕ
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Host key:', pendingLocalKey.slice(0, 8) + '...');
 
+  // 3. Сохраняем контакт
   await _upsertContact(roomId, session.display, 'host');
 
+  // 4. Создаём offer
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
   await _waitForIce();
-  if (session.aborted) return;
+  
+  if (!session || session.aborted) return;
 
   const res = await Signal.postOffer(roomId, peerConnection.localDescription.sdp);
   if (res.status === 409) {
@@ -171,7 +177,10 @@ async function _startAsHost(roomId) {
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('waiting');
   LOG.webrtc('Host: waiting for answer...');
 
-  session.timer = setTimeout(() => _failConnect('Время ожидания истекло'), 5 * 60 * 1000);
+  // ИСПРАВЛЕНИЕ ОШИБКИ TIMER: проверяем session перед установкой
+  if (session) {
+    session.timer = setTimeout(() => _failConnect('Время ожидания истекло'), 5 * 60 * 1000);
+  }
 
   const poll = async () => {
     if (!session || session.aborted) return;
@@ -188,27 +197,36 @@ async function _startAsHost(roomId) {
 }
 
 async function _joinAsGuest(roomId, offerData) {
+  if (!session) return;
   session.role = 'guest';
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('linking');
 
+  // 1. Создаём PeerConnection ПЕРВЫМ
   _createPeerConnection(roomId, false);
 
+  // 2. Генерируем ключ ПОСЛЕ
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest key:', pendingLocalKey.slice(0, 8) + '...');
 
+  // 3. Сохраняем контакт
   await _upsertContact(roomId, session.display, 'guest');
 
+  // 4. Устанавливаем offer
   LOG.webrtc('Setting remote offer');
   await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
   await _waitForIce();
-  if (session.aborted) return;
+  
+  if (!session || session.aborted) return;
 
   await Signal.postAnswer(roomId, peerConnection.localDescription.sdp);
   LOG.webrtc('Guest: answer posted, waiting for handshake...');
 
-  session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
+  // ИСПРАВЛЕНИЕ ОШИБКИ TIMER
+  if (session) {
+    session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
+  }
 }
 
 function cancelConnect(silent) {
@@ -216,17 +234,28 @@ function cancelConnect(silent) {
     session.aborted = true;
     if (session.timer) clearTimeout(session.timer);
     if (session.role === 'host') Signal.closeRoom(session.roomId);
+    session.timer = null; // Обнуляем таймер
   }
-  session = null;
+  session = null; // Обнуляем сессию
   _teardownPeer();
   if (!silent && typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('idle');
 }
 
 function _failConnect(msg) {
   LOG.error('Connection failed:', msg);
-  if (session) { session.aborted = true; if (session.timer) clearTimeout(session.timer); }
+  
+  // ИСПРАВЛЕНИЕ: Проверяем существование session и timer
+  if (session) {
+    if (session.timer) {
+        clearTimeout(session.timer);
+        session.timer = null;
+    }
+    session.aborted = true;
+  }
+  
   session = null;
   _teardownPeer();
+  
   if (typeof UI !== 'undefined') {
     if (UI.setConnectStage) UI.setConnectStage('idle');
     if (UI.toast) UI.toast(msg, 'error');
@@ -259,18 +288,18 @@ function _createPeerConnection(roomId, isHost) {
     const st = peerConnection.connectionState;
     LOG.webrtc('State:', st);
     if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
+    
     if (st === 'connected') _onConnected();
+    
+    // ИСПРАВЛЕНИЕ: Проверяем session перед вызовом failConnect
     if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
       _failConnect('Соединение разорвано (' + st + ')');
     }
   };
 
-  // Исправление #3: детальное логирование каждого ICE candidate
   peerConnection.onicecandidate = (e) => {
     if (e.candidate) {
-      LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address || 'relay');
-    } else {
-      LOG.webrtc('ICE gathering complete (null candidate)');
+        LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol);
     }
   };
 
@@ -362,13 +391,17 @@ function _setupDataChannel(roomId) {
 
 function _onConnected() {
   if (!session) return;
-  const roomId = session.roomId; // ← берём из session, а не из activePeer
+  const roomId = session.roomId; // Берем ID из session, так как activePeer может быть еще null
   LOG.webrtc('✅ LINK ESTABLISHED', { roomId, role: session.role });
+  
   if (session.timer) clearTimeout(session.timer);
   if (session.role === 'host') Signal.closeRoom(roomId);
-  session = null;
+  
+  // Устанавливаем activePeer ДО вызова UI
   activePeer = roomId;
   localStorage.setItem('activePeer', roomId);
+  
+  session = null;
   if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
 }
 
@@ -380,29 +413,16 @@ function _teardownPeer() {
   if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
 }
 
-// Исправление #1: увеличен timeout до 15 секунд для TURN
-// Исправление #3: добавлено логирование причины завершения
 async function _waitForIce() {
   if (!peerConnection) return;
-  if (peerConnection.iceGatheringState === 'complete') {
-    LOG.webrtc('ICE already complete');
-    return;
-  }
-  LOG.webrtc('Waiting for ICE candidates...');
+  if (peerConnection.iceGatheringState === 'complete') return;
   return new Promise(resolve => {
     let done = false;
-    const finish = (reason) => {
-      if (!done) {
-        done = true;
-        LOG.webrtc('ICE done:', reason);
-        resolve();
-      }
-    };
+    const finish = () => { if (!done) { done = true; resolve(); } };
     peerConnection.addEventListener('icegatheringstatechange', () => {
-      if (peerConnection.iceGatheringState === 'complete') finish('gathering complete');
+      if (peerConnection.iceGatheringState === 'complete') finish();
     });
-    // 15 секунд вместо 10 — TURN-кандидаты требуют больше времени
-    setTimeout(() => finish('timeout (15s)'), 15000);
+    setTimeout(finish, 15000); // 15 секунд для TURN
   });
 }
 
@@ -498,10 +518,19 @@ async function sendImage(file) {
   if (!remoteKey) return;
 
   try {
-    const compressed = await CryptoSystem.compressImage(file, 800);
-    const buffer = await compressed.blob.arrayBuffer();
+    // Используем встроенное сжатие если есть, иначе отправляем как есть
+    let blob = file;
+    let type = file.type;
+    
+    if (typeof CryptoSystem.compressImage === 'function') {
+        const compressed = await CryptoSystem.compressImage(file, 800);
+        blob = compressed.blob;
+        type = compressed.type;
+    }
+
+    const buffer = await blob.arrayBuffer();
     const ciphertext = await CryptoSystem.encryptData(buffer, remoteKey);
-    const msg = { type: 'image', from: currentUser, ciphertext, mimeType: compressed.type, timestamp: Date.now() };
+    const msg = { type: 'image', from: currentUser, ciphertext, mimeType: type, timestamp: Date.now() };
     dataChannel.send(JSON.stringify(msg));
     await _saveMessage(activePeer, msg);
     if (typeof UI !== 'undefined' && UI.loadMessages) UI.loadMessages(activePeer);
@@ -511,36 +540,6 @@ async function sendImage(file) {
     if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ошибка отправки изображения', 'error');
   }
 }
-
-// ===================== ОТЛАДКА =====================
-window.debug = {
-  dump: () => {
-    const s = window.WebRTC.getState();
-    console.log('%c=== STATE DUMP ===', 'color:#38bdf8;font-weight:bold;font-size:14px');
-    console.log('currentUser:', s.currentUser);
-    console.log('activePeer:', s.activePeer);
-    console.log('dataChannel:', s.dataChannel ? s.dataChannel.readyState : 'null');
-    console.log('peerConnection:', s.peerConnection ? s.peerConnection.connectionState : 'null');
-    console.log('session:', s.session);
-    console.log('contacts:', Object.entries(s.contacts).map(([id, c]) => ({
-      id: id.slice(0, 8), name: c.name,
-      localKeys: (c.localKeys || []).length,
-      remoteKeys: (c.remoteKeys || []).length
-    })));
-    if (s.activePeer && s.contacts[s.activePeer]) {
-      console.log('%c--- Active peer ---', 'color:#a78bfa;font-weight:bold');
-      console.log('localKeys:', s.contacts[s.activePeer].localKeys);
-      console.log('remoteKeys:', s.contacts[s.activePeer].remoteKeys);
-    }
-  },
-  testCrypto: async () => {
-    const key = (contacts[activePeer]?.remoteKeys || [])[0];
-    if (!key) { console.error('No key'); return; }
-    const enc = await CryptoSystem.encrypt('test', key);
-    const dec = await CryptoSystem.decrypt(enc, key);
-    console.log(dec === 'test' ? '✅ Crypto OK' : '❌ Crypto FAIL');
-  }
-};
 
 // ===================== ЭКСПОРТ =====================
 window.WebRTC = {

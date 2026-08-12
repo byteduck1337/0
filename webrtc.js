@@ -1,10 +1,11 @@
-
 const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
+// ===================== ICE КОНФИГУРАЦИЯ =====================
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
     {
       urls: 'turn:a.relay.metered.ca:80',
       username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
@@ -30,7 +31,7 @@ let peerConnection = null;
 let dataChannel = null;
 let pendingLocalKey = null;
 let keySendInterval = null;
-let session = null; // { roomId, phrase, display, role, aborted, timer }
+let session = null;
 
 // ===================== ЛОГИРОВАНИЕ =====================
 const LOG = {
@@ -146,17 +147,13 @@ async function connect(rawPhrase) {
 async function _startAsHost(roomId) {
   session.role = 'host';
 
-  // 1. Создаём PeerConnection ПЕРВЫМ (teardown обнулит старое)
   _createPeerConnection(roomId, true);
 
-  // 2. Генерируем ключ ПОСЛЕ создания канала
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Host key:', pendingLocalKey.slice(0, 8) + '...');
 
-  // 3. Сохраняем контакт ДО отправки offer
   await _upsertContact(roomId, session.display, 'host');
 
-  // 4. Создаём и публикуем offer
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
   await _waitForIce();
@@ -176,7 +173,6 @@ async function _startAsHost(roomId) {
 
   session.timer = setTimeout(() => _failConnect('Время ожидания истекло'), 5 * 60 * 1000);
 
-  // Polling ответа
   const poll = async () => {
     if (!session || session.aborted) return;
     const ans = await Signal.getAnswer(roomId);
@@ -195,17 +191,13 @@ async function _joinAsGuest(roomId, offerData) {
   session.role = 'guest';
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('linking');
 
-  // 1. Создаём PeerConnection ПЕРВЫМ
   _createPeerConnection(roomId, false);
 
-  // 2. Генерируем ключ ПОСЛЕ
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest key:', pendingLocalKey.slice(0, 8) + '...');
 
-  // 3. Сохраняем контакт ДО setRemoteDescription
   await _upsertContact(roomId, session.display, 'guest');
 
-  // 4. Устанавливаем offer и создаём answer
   LOG.webrtc('Setting remote offer');
   await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
   const answer = await peerConnection.createAnswer();
@@ -273,8 +265,13 @@ function _createPeerConnection(roomId, isHost) {
     }
   };
 
+  // Исправление #3: детальное логирование каждого ICE candidate
   peerConnection.onicecandidate = (e) => {
-    if (e.candidate) LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol);
+    if (e.candidate) {
+      LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol, e.candidate.address || 'relay');
+    } else {
+      LOG.webrtc('ICE gathering complete (null candidate)');
+    }
   };
 
   if (isHost) {
@@ -380,16 +377,29 @@ function _teardownPeer() {
   if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
 }
 
+// Исправление #1: увеличен timeout до 15 секунд для TURN
+// Исправление #3: добавлено логирование причины завершения
 async function _waitForIce() {
   if (!peerConnection) return;
-  if (peerConnection.iceGatheringState === 'complete') return;
+  if (peerConnection.iceGatheringState === 'complete') {
+    LOG.webrtc('ICE already complete');
+    return;
+  }
+  LOG.webrtc('Waiting for ICE candidates...');
   return new Promise(resolve => {
     let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
+    const finish = (reason) => {
+      if (!done) {
+        done = true;
+        LOG.webrtc('ICE done:', reason);
+        resolve();
+      }
+    };
     peerConnection.addEventListener('icegatheringstatechange', () => {
-      if (peerConnection.iceGatheringState === 'complete') finish();
+      if (peerConnection.iceGatheringState === 'complete') finish('gathering complete');
     });
-    setTimeout(finish, 10000);
+    // 15 секунд вместо 10 — TURN-кандидаты требуют больше времени
+    setTimeout(() => finish('timeout (15s)'), 15000);
   });
 }
 
@@ -410,7 +420,6 @@ async function _upsertContact(roomId, display, role) {
     remoteKeys: oldRemote
   };
 
-  // Перемещаем в начало
   const ordered = { [roomId]: contacts[roomId] };
   for (const [k, v] of Object.entries(contacts)) if (k !== roomId) ordered[k] = v;
   contacts = ordered;

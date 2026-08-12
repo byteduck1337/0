@@ -104,4 +104,23 @@ class CryptoSystem {
         const words = ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot', 'Golf', 'Hotel', 'Red', 'Blue', 'Green', 'Yellow', 'Black', 'White', 'Zero', 'One'];
         return `${words[bytes[0] % 8]}-${words[8 + (bytes[1] % 6)]}-${bytes[2] % 100}-${bytes[3] % 100}`;
     }
+      static async compressImage(file, maxDim = 800) {
+    if (!file.type.startsWith('image/')) return { blob: file, type: file.type };
+    try {
+      const bitmap = await createImageBitmap(file);
+      const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+      const w = Math.round(bitmap.width * scale);
+      const h = Math.round(bitmap.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+      bitmap.close();
+      const blob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.85));
+      return { blob: blob || file, type: blob ? 'image/jpeg' : file.type };
+    } catch (e) 
+    {
+      return { blob: file, type: file.type };
+    }
+  }
 }

@@ -135,24 +135,14 @@ async function connect(rawPhrase) {
 async function _startAsHost(roomId) {
   if (!session) return;
   session.role = 'host';
-
-  // 1. Создаём PeerConnection ПЕРВЫМ (как в рабочем примере)
   _createPeerConnection(roomId, true);
-
-  // 2. Генерируем ключ ПОСЛЕ создания канала
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Host key:', pendingLocalKey.slice(0, 8) + '...');
-
-  // 3. Сохраняем контакт
   await _upsertContact(roomId, session.display, 'host');
 
-  // 4. Создаём offer
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
-  
-  // Ждём завершения сбора ICE кандидатов (важно для STUN)
-  await _waitForIceGathering();
-  
+  await _waitForIce();
   if (!session || session.aborted) return;
 
   const res = await Signal.postOffer(roomId, peerConnection.localDescription.sdp);
@@ -176,11 +166,11 @@ async function _startAsHost(roomId) {
     const ans = await Signal.getAnswer(roomId);
     if (ans && ans.sdp) {
       LOG.webrtc('Answer received!');
-      try { 
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(ans)); 
-      } catch (e) { 
-        LOG.error('setRemoteDescription failed:', e); 
-      }
+      try {
+        // ИСПРАВЛЕНИЕ: Явно передаем type и sdp
+        const sdpContent = typeof ans.sdp === 'string' ? ans.sdp : ans.sdp.sdp;
+        await peerConnection.setRemoteDescription({ type: 'answer', sdp: sdpContent });
+      } catch (e) { LOG.error('setRemoteDescription failed:', e); }
     } else {
       setTimeout(poll, 1500);
     }
@@ -192,34 +182,32 @@ async function _joinAsGuest(roomId, offerData) {
   if (!session) return;
   session.role = 'guest';
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('linking');
-
-  // 1. Создаём PeerConnection ПЕРВЫМ
+  
   _createPeerConnection(roomId, false);
-
-  // 2. Генерируем ключ ПОСЛЕ
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest key:', pendingLocalKey.slice(0, 8) + '...');
-
-  // 3. Сохраняем контакт
   await _upsertContact(roomId, session.display, 'guest');
 
-  // 4. Устанавливаем offer
   LOG.webrtc('Setting remote offer');
-  await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData));
-  
-  const answer = await peerConnection.createAnswer();
-  await peerConnection.setLocalDescription(answer);
-  
-  // Ждём завершения сбора ICE кандидатов
-  await _waitForIceGathering();
-  
-  if (!session || session.aborted) return;
+  try {
+    // ИСПРАВЛЕНИЕ: Явно передаем type и sdp
+    const sdpContent = typeof offerData.sdp === 'string' ? offerData.sdp : offerData.sdp.sdp;
+    await peerConnection.setRemoteDescription({ type: 'offer', sdp: sdpContent });
+    
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    await _waitForIce();
+    if (!session || session.aborted) return;
 
-  await Signal.postAnswer(roomId, peerConnection.localDescription.sdp);
-  LOG.webrtc('Guest: answer posted, waiting for handshake...');
+    await Signal.postAnswer(roomId, peerConnection.localDescription.sdp);
+    LOG.webrtc('Guest: answer posted, waiting for handshake...');
 
-  if (session) {
-    session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
+    if (session) {
+      session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
+    }
+  } catch (e) {
+    LOG.error('Guest setup failed:', e);
+    _failConnect('Ошибка установки соединения: ' + e.message);
   }
 }
 

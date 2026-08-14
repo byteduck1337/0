@@ -1,23 +1,11 @@
 const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
-// ===================== ICE КОНФИГУРАЦИЯ (TURN + STUN) =====================
+// ===================== ICE КОНФИГУРАЦИЯ (Только STUN, как в рабочем примере) =====================
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    // РАБОЧИЙ TURN из old.js
-    {
-      urls: 'turn:a.relay.metered.ca:80',
-      username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
-      credential: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6'
-    },
-    {
-      urls: 'turn:a.relay.metered.ca:443?transport=tcp',
-      username: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6',
-      credential: 'Ok-KBsUxeX9YqPHO8ILweksA0uH5oIPxmxRvroC6YHDBI8d6'
-    }
-  ],
-  iceCandidatePoolSize: 10
+    { urls: 'stun:stun1.l.google.com:19302' }
+  ]
 };
 
 // ===================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ =====================
@@ -31,7 +19,7 @@ let peerConnection = null;
 let dataChannel = null;
 let pendingLocalKey = null;
 let keySendInterval = null;
-let session = null; // { roomId, phrase, display, role, aborted, timer }
+let session = null;
 
 // ===================== ЛОГИРОВАНИЕ =====================
 const LOG = {
@@ -148,10 +136,10 @@ async function _startAsHost(roomId) {
   if (!session) return;
   session.role = 'host';
 
-  // 1. Создаём PeerConnection ПЕРВЫМ
+  // 1. Создаём PeerConnection ПЕРВЫМ (как в рабочем примере)
   _createPeerConnection(roomId, true);
 
-  // 2. Генерируем ключ ПОСЛЕ
+  // 2. Генерируем ключ ПОСЛЕ создания канала
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Host key:', pendingLocalKey.slice(0, 8) + '...');
 
@@ -161,7 +149,9 @@ async function _startAsHost(roomId) {
   // 4. Создаём offer
   const offer = await peerConnection.createOffer();
   await peerConnection.setLocalDescription(offer);
-  await _waitForIce();
+  
+  // Ждём завершения сбора ICE кандидатов (важно для STUN)
+  await _waitForIceGathering();
   
   if (!session || session.aborted) return;
 
@@ -177,7 +167,6 @@ async function _startAsHost(roomId) {
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('waiting');
   LOG.webrtc('Host: waiting for answer...');
 
-  // ИСПРАВЛЕНИЕ ОШИБКИ TIMER: проверяем session перед установкой
   if (session) {
     session.timer = setTimeout(() => _failConnect('Время ожидания истекло'), 5 * 60 * 1000);
   }
@@ -187,8 +176,11 @@ async function _startAsHost(roomId) {
     const ans = await Signal.getAnswer(roomId);
     if (ans && ans.sdp) {
       LOG.webrtc('Answer received!');
-      try { await peerConnection.setRemoteDescription({ type: 'answer', sdp: ans.sdp }); }
-      catch (e) { LOG.error('setRemoteDescription failed:', e); }
+      try { 
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(ans)); 
+      } catch (e) { 
+        LOG.error('setRemoteDescription failed:', e); 
+      }
     } else {
       setTimeout(poll, 1500);
     }
@@ -213,17 +205,19 @@ async function _joinAsGuest(roomId, offerData) {
 
   // 4. Устанавливаем offer
   LOG.webrtc('Setting remote offer');
-  await peerConnection.setRemoteDescription({ type: 'offer', sdp: offerData.sdp });
+  await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData));
+  
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
-  await _waitForIce();
+  
+  // Ждём завершения сбора ICE кандидатов
+  await _waitForIceGathering();
   
   if (!session || session.aborted) return;
 
   await Signal.postAnswer(roomId, peerConnection.localDescription.sdp);
   LOG.webrtc('Guest: answer posted, waiting for handshake...');
 
-  // ИСПРАВЛЕНИЕ ОШИБКИ TIMER
   if (session) {
     session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
   }
@@ -234,28 +228,24 @@ function cancelConnect(silent) {
     session.aborted = true;
     if (session.timer) clearTimeout(session.timer);
     if (session.role === 'host') Signal.closeRoom(session.roomId);
-    session.timer = null; // Обнуляем таймер
+    session.timer = null;
   }
-  session = null; // Обнуляем сессию
+  session = null;
   _teardownPeer();
   if (!silent && typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('idle');
 }
 
 function _failConnect(msg) {
   LOG.error('Connection failed:', msg);
-  
-  // ИСПРАВЛЕНИЕ: Проверяем существование session и timer
   if (session) {
     if (session.timer) {
-        clearTimeout(session.timer);
-        session.timer = null;
+      clearTimeout(session.timer);
+      session.timer = null;
     }
     session.aborted = true;
   }
-  
   session = null;
   _teardownPeer();
-  
   if (typeof UI !== 'undefined') {
     if (UI.setConnectStage) UI.setConnectStage('idle');
     if (UI.toast) UI.toast(msg, 'error');
@@ -275,8 +265,9 @@ async function reconnect(peerId) {
 function _createPeerConnection(roomId, isHost) {
   _teardownPeer();
 
+  // Используем простую конфигурацию только со STUN (как в рабочем примере)
   peerConnection = new RTCPeerConnection(ICE_CONFIG);
-  LOG.webrtc('RTCPeerConnection created', { roomId, isHost, servers: ICE_CONFIG.iceServers.length });
+  LOG.webrtc('RTCPeerConnection created (STUN only)', { roomId, isHost });
 
   peerConnection.oniceconnectionstatechange = () => {
     LOG.webrtc('ICE:', peerConnection.iceConnectionState);
@@ -290,8 +281,6 @@ function _createPeerConnection(roomId, isHost) {
     if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
     
     if (st === 'connected') _onConnected();
-    
-    // ИСПРАВЛЕНИЕ: Проверяем session перед вызовом failConnect
     if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
       _failConnect('Соединение разорвано (' + st + ')');
     }
@@ -299,7 +288,9 @@ function _createPeerConnection(roomId, isHost) {
 
   peerConnection.onicecandidate = (e) => {
     if (e.candidate) {
-        LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol);
+      LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol);
+    } else {
+      LOG.webrtc('ICE gathering complete');
     }
   };
 
@@ -391,17 +382,16 @@ function _setupDataChannel(roomId) {
 
 function _onConnected() {
   if (!session) return;
-  const roomId = session.roomId; // Берем ID из session, так как activePeer может быть еще null
+  const roomId = session.roomId;
   LOG.webrtc('✅ LINK ESTABLISHED', { roomId, role: session.role });
   
   if (session.timer) clearTimeout(session.timer);
   if (session.role === 'host') Signal.closeRoom(roomId);
   
-  // Устанавливаем activePeer ДО вызова UI
   activePeer = roomId;
   localStorage.setItem('activePeer', roomId);
-  
   session = null;
+  
   if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
 }
 
@@ -413,16 +403,29 @@ function _teardownPeer() {
   if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
 }
 
-async function _waitForIce() {
-  if (!peerConnection) return;
-  if (peerConnection.iceGatheringState === 'complete') return;
+// Функция ожидания ICE как в рабочем примере (waitForIceGathering)
+function _waitForIceGathering() {
   return new Promise(resolve => {
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    peerConnection.addEventListener('icegatheringstatechange', () => {
-      if (peerConnection.iceGatheringState === 'complete') finish();
-    });
-    setTimeout(finish, 15000); // 15 секунд для TURN
+    if (!peerConnection) return resolve();
+    if (peerConnection.iceGatheringState === 'complete') {
+      LOG.webrtc('ICE already complete');
+      return resolve();
+    }
+    
+    LOG.webrtc('Waiting for ICE gathering...');
+    
+    peerConnection.onicegatheringstatechange = () => {
+      if (peerConnection.iceGatheringState === 'complete') {
+        LOG.webrtc('ICE gathering complete');
+        resolve();
+      }
+    };
+    
+    // Таймаут 5 секунд (для STUN этого достаточно)
+    setTimeout(() => {
+      LOG.warn('ICE gathering timeout (5s)');
+      resolve();
+    }, 5000);
   });
 }
 
@@ -518,14 +521,12 @@ async function sendImage(file) {
   if (!remoteKey) return;
 
   try {
-    // Используем встроенное сжатие если есть, иначе отправляем как есть
     let blob = file;
     let type = file.type;
-    
     if (typeof CryptoSystem.compressImage === 'function') {
-        const compressed = await CryptoSystem.compressImage(file, 800);
-        blob = compressed.blob;
-        type = compressed.type;
+      const compressed = await CryptoSystem.compressImage(file, 800);
+      blob = compressed.blob;
+      type = compressed.type;
     }
 
     const buffer = await blob.arrayBuffer();

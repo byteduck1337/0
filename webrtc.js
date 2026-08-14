@@ -1,6 +1,5 @@
 const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
 
-// ===================== ICE КОНФИГУРАЦИЯ (Только STUN, как в рабочем примере) =====================
 const ICE_CONFIG = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -8,7 +7,6 @@ const ICE_CONFIG = {
   ]
 };
 
-// ===================== ГЛОБАЛЬНОЕ СОСТОЯНИЕ =====================
 let currentUser = null;
 let myName = 'Node_01';
 let contacts = {};
@@ -21,7 +19,6 @@ let pendingLocalKey = null;
 let keySendInterval = null;
 let session = null;
 
-// ===================== ЛОГИРОВАНИЕ =====================
 const LOG = {
   webrtc:  (...a) => console.log('%c[WebRTC]%c',  'color:#38bdf8;font-weight:bold', 'color:inherit', ...a),
   signal:  (...a) => console.log('%c[Signal]%c',   'color:#fbbf24;font-weight:bold', 'color:inherit', ...a),
@@ -32,7 +29,6 @@ const LOG = {
   warn:    (...a) => console.warn('%c[WARN]%c',    'color:#f59e0b;font-weight:bold', 'color:inherit', ...a),
 };
 
-// ===================== СЕКРЕТНЫЕ ФРАЗЫ =====================
 const ADJ = [
   'быстрый','тихий','смелый','красный','синий','белый','чёрный','серый','ясный','тёплый',
   'холодный','летний','зимний','весенний','осенний','дикий','гордый','умный','добрый','строгий',
@@ -65,7 +61,6 @@ function normalizePhrase(raw) {
   return (raw || '').toLowerCase().replace(/[^a-zа-яё0-9]/g, '');
 }
 
-// ===================== СИГНАЛЬНЫЙ СЕРВЕР =====================
 const Signal = {
   async getOffer(roomId) {
     try {
@@ -100,7 +95,6 @@ const Signal = {
   }
 };
 
-// ===================== ПОДКЛЮЧЕНИЕ ПО ФРАЗЕ =====================
 async function connect(rawPhrase) {
   const clean = (rawPhrase || '').trim();
   const norm = normalizePhrase(clean);
@@ -167,7 +161,6 @@ async function _startAsHost(roomId) {
     if (ans && ans.sdp) {
       LOG.webrtc('Answer received!');
       try {
-        // ИСПРАВЛЕНИЕ: Явно передаем type и sdp
         const sdpContent = typeof ans.sdp === 'string' ? ans.sdp : ans.sdp.sdp;
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: sdpContent });
       } catch (e) { LOG.error('setRemoteDescription failed:', e); }
@@ -190,7 +183,6 @@ async function _joinAsGuest(roomId, offerData) {
 
   LOG.webrtc('Setting remote offer');
   try {
-    // ИСПРАВЛЕНИЕ: Явно передаем type и sdp
     const sdpContent = typeof offerData.sdp === 'string' ? offerData.sdp : offerData.sdp.sdp;
     await peerConnection.setRemoteDescription({ type: 'offer', sdp: sdpContent });
     
@@ -249,13 +241,10 @@ async function reconnect(peerId) {
   if (typeof UI !== 'undefined' && UI.openNewSession) UI.openNewSession(c.phrase, true);
 }
 
-// ===================== WEBRTC / DATACHANNEL =====================
 function _createPeerConnection(roomId, isHost) {
   _teardownPeer();
-
-  // Используем простую конфигурацию только со STUN (как в рабочем примере)
   peerConnection = new RTCPeerConnection(ICE_CONFIG);
-  LOG.webrtc('RTCPeerConnection created (STUN only)', { roomId, isHost });
+  LOG.webrtc('RTCPeerConnection created', { roomId, isHost });
 
   peerConnection.oniceconnectionstatechange = () => {
     LOG.webrtc('ICE:', peerConnection.iceConnectionState);
@@ -391,8 +380,7 @@ function _teardownPeer() {
   if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
 }
 
-// Функция ожидания ICE как в рабочем примере (waitForIceGathering)
-function _waitForIceGathering() {
+function _waitForIce() {
   return new Promise(resolve => {
     if (!peerConnection) return resolve();
     if (peerConnection.iceGatheringState === 'complete') {
@@ -409,7 +397,6 @@ function _waitForIceGathering() {
       }
     };
     
-    // Таймаут 5 секунд (для STUN этого достаточно)
     setTimeout(() => {
       LOG.warn('ICE gathering timeout (5s)');
       resolve();
@@ -417,7 +404,6 @@ function _waitForIceGathering() {
   });
 }
 
-// ===================== КОНТАКТЫ И ИСТОРИЯ =====================
 async function _upsertContact(roomId, display, role) {
   const prev = contacts[roomId] || {};
   const oldLocal = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
@@ -467,7 +453,6 @@ async function loadHistory(peerId) {
     : JSON.parse(localStorage.getItem(key) || '[]');
 }
 
-// ===================== ОТПРАВКА СООБЩЕНИЙ =====================
 async function sendMessage() {
   const input = document.getElementById('message-input');
   if (!input) return;
@@ -530,7 +515,6 @@ async function sendImage(file) {
   }
 }
 
-// ===================== ЭКСПОРТ =====================
 window.WebRTC = {
   connect,
   cancelConnect,

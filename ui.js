@@ -19,9 +19,14 @@ const UI = {
   },
 
   checkAuth: async () => {
-    const hasData = localStorage.getItem('contacts_encrypted');
-    await UI.promptPassword(!hasData);
-    await UI.bootstrap();
+    try {
+      const hasData = !!localStorage.getItem('contacts_encrypted');
+      await UI.promptPassword(!hasData);
+      await UI.bootstrap();
+    } catch (e) {
+      UI_LOG.error('checkAuth failed:', e);
+      UI.toast('Ошибка инициализации: ' + (e.message || e), 'error');
+    }
   },
 
   promptPassword: (isCreate) => {
@@ -102,7 +107,8 @@ const UI = {
     const list = document.getElementById('contact-list');
     if (!list) return;
     list.innerHTML = '';
-    const state = window.WebRTC.getState();
+    // Защита от вызова до инициализации WebRTC
+    const state = window.WebRTC?.getState?.() || {};
     const online = state.dataChannel && state.dataChannel.readyState === 'open';
     const q = (document.getElementById('search-input')?.value || '').toLowerCase();
 
@@ -154,7 +160,7 @@ const UI = {
   },
 
   updateStatus: () => {
-    const state = window.WebRTC.getState();
+    const state = window.WebRTC?.getState?.() || {};
     const isOnline = state.dataChannel && state.dataChannel.readyState === 'open';
     const dot = document.getElementById('status-dot');
     const txt = document.getElementById('chat-status');
@@ -177,14 +183,23 @@ const UI = {
       UI_LOG.error('Messages container not found');
       return;
     }
+    
+    // Очистка старых Blob URL во избежание утечек памяти
+    container.querySelectorAll('img[data-blob]').forEach(img => {
+      try { URL.revokeObjectURL(img.src); } catch {}
+    });
     container.innerHTML = '';
+
     const history = await window.WebRTC.loadHistory(id);
     UI_LOG.info('History loaded:', history.length, 'messages');
 
-    const state = window.WebRTC.getState();
+    const state = window.WebRTC?.getState?.() || {};
     const c = contacts[id] || {};
-    const myKeys = [...(c.remoteKeys || [])].reverse();
-    const theirKeys = [...(c.localKeys || [])].reverse();
+    
+    // Ключи собеседника (для расшифровки МОИХ исходящих сообщений)
+    const peerKeys = [...(c.remoteKeys || [])].reverse();
+    // Мои ключи (для расшифровки ВХОДЯЩИХ сообщений)
+    const ownKeys  = [...(c.localKeys || [])].reverse();
 
     const tryDecrypt = async (ciphertext, keys, isData) => {
       for (const k of keys) {
@@ -197,7 +212,7 @@ const UI = {
 
     for (const msg of history) {
       const mine = msg.from === state.currentUser;
-      const keys = mine ? myKeys : theirKeys;
+      const keys = mine ? peerKeys : ownKeys; // Правильный выбор ключей
       const row = document.createElement('div');
       row.className = 'message ' + (mine ? 'mine' : 'other');
       const body = document.createElement('div');
@@ -209,7 +224,9 @@ const UI = {
         if (buf) {
           const url = URL.createObjectURL(new Blob([buf], { type: msg.mimeType }));
           const img = document.createElement('img');
-          img.src = url; img.loading = 'lazy';
+          img.src = url; 
+          img.loading = 'lazy';
+          img.dataset.blob = '1'; // Метка для очистки
           img.onclick = () => UI.openLightbox(url);
           body.appendChild(img); ok = true;
         }
@@ -232,8 +249,6 @@ const UI = {
     }
     requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
   },
-
-  /* ---------- новое соединение ---------- */
 
   openNewSession: (prefill = '', autostart = false) => {
     document.getElementById('new-session-modal').classList.remove('hidden');
@@ -271,7 +286,7 @@ const UI = {
     status.textContent = texts[stage] || '';
 
     if (stage === 'waiting') {
-      const s = window.WebRTC.getState().session;
+      const s = window.WebRTC?.getState?.().session;
       document.getElementById('ns-phrase').textContent = s ? s.display : '';
     }
   },

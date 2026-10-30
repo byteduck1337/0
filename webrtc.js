@@ -7,6 +7,8 @@ const ICE_CONFIG = {
   ]
 };
 
+const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
+
 let currentUser = null;
 let myName = 'Node_01';
 let contacts = {};
@@ -104,7 +106,11 @@ async function connect(rawPhrase) {
   LOG.webrtc('connect()', { phrase: clean, roomId });
 
   cancelConnect(true);
-  session = { roomId, phrase: norm, display: clean.toUpperCase().replace(/\s+/g, '-'), role: null, aborted: false, timer: null };
+  session = {
+    roomId, phrase: norm,
+    display: clean.toUpperCase().replace(/\s+/g, '-'),
+    role: null, aborted: false, timer: null
+  };
 
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('checking');
 
@@ -140,6 +146,10 @@ async function _startAsHost(roomId) {
   if (!session || session.aborted) return;
 
   const res = await Signal.postOffer(roomId, peerConnection.localDescription.sdp);
+  if (!res.ok && res.status !== 409) {
+    _failConnect(`Signaling error: HTTP ${res.status}`);
+    return;
+  }
   if (res.status === 409) {
     LOG.webrtc('409 conflict → switching to GUEST');
     _teardownPeer();
@@ -163,7 +173,9 @@ async function _startAsHost(roomId) {
       try {
         const sdpContent = typeof ans.sdp === 'string' ? ans.sdp : ans.sdp.sdp;
         await peerConnection.setRemoteDescription({ type: 'answer', sdp: sdpContent });
-      } catch (e) { LOG.error('setRemoteDescription failed:', e); }
+      } catch (e) {
+        LOG.error('setRemoteDescription failed:', e);
+      }
     } else {
       setTimeout(poll, 1500);
     }
@@ -175,7 +187,7 @@ async function _joinAsGuest(roomId, offerData) {
   if (!session) return;
   session.role = 'guest';
   if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('linking');
-  
+
   _createPeerConnection(roomId, false);
   pendingLocalKey = CryptoSystem.generateKey();
   LOG.keys('Guest key:', pendingLocalKey.slice(0, 8) + '...');
@@ -185,7 +197,7 @@ async function _joinAsGuest(roomId, offerData) {
   try {
     const sdpContent = typeof offerData.sdp === 'string' ? offerData.sdp : offerData.sdp.sdp;
     await peerConnection.setRemoteDescription({ type: 'offer', sdp: sdpContent });
-    
+
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
     await _waitForIce();
@@ -256,8 +268,8 @@ function _createPeerConnection(roomId, isHost) {
     const st = peerConnection.connectionState;
     LOG.webrtc('State:', st);
     if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
-    
-    if (st === 'connected') _onConnected();
+
+    // _onConnected больше не вызывается здесь — триггерится из dataChannel.onopen
     if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
       _failConnect('Соединение разорвано (' + st + ')');
     }
@@ -288,9 +300,16 @@ function _setupDataChannel(roomId) {
   if (!dataChannel) return;
 
   const sendKey = () => {
-    if (dataChannel && dataChannel.readyState === 'open' && pendingLocalKey) {
-      LOG.keys('⬆ Sending key:', pendingLocalKey.slice(0, 8) + '...');
+    if (!dataChannel || dataChannel.readyState !== 'open') return;
+    if (!pendingLocalKey) {
+      pendingLocalKey = CryptoSystem.generateKey();
+      LOG.keys('Key regenerated:', pendingLocalKey.slice(0, 8) + '...');
+    }
+    LOG.keys('⬆ Sending key:', pendingLocalKey.slice(0, 8) + '...');
+    try {
       dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
+    } catch (e) {
+      LOG.warn('key send failed:', e.message);
     }
   };
 
@@ -298,8 +317,18 @@ function _setupDataChannel(roomId) {
     LOG.channel('✅ DataChannel OPEN');
     sendKey();
     keySendInterval = setInterval(sendKey, 1000);
+
     activePeer = roomId;
     localStorage.setItem('activePeer', roomId);
+
+    // Сессия завершена — триггерим UI именно здесь, когда канал реально открыт
+    if (session && session.roomId === roomId) {
+      if (session.timer) clearTimeout(session.timer);
+      if (session.role === 'host') Signal.closeRoom(roomId);
+      session = null;
+      if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
+    }
+
     if (typeof UI !== 'undefined') {
       if (UI.updateStatus) UI.updateStatus();
       if (UI.renderContacts) UI.renderContacts();
@@ -336,7 +365,11 @@ function _setupDataChannel(roomId) {
         }
         await _saveContacts();
         if (activePeer === roomId && typeof UI !== 'undefined' && UI.loadMessages) UI.loadMessages(roomId);
-        dataChannel.send(JSON.stringify({ type: 'key_ack' }));
+        try {
+          dataChannel.send(JSON.stringify({ type: 'key_ack' }));
+        } catch (e) {
+          LOG.warn('key_ack send failed (channel closed)');
+        }
 
       } else if (msg.type === 'key_ack') {
         LOG.keys('key_ack received — stopping broadcast');
@@ -357,25 +390,16 @@ function _setupDataChannel(roomId) {
   };
 }
 
-function _onConnected() {
-  if (!session) return;
-  const roomId = session.roomId;
-  LOG.webrtc('✅ LINK ESTABLISHED', { roomId, role: session.role });
-  
-  if (session.timer) clearTimeout(session.timer);
-  if (session.role === 'host') Signal.closeRoom(roomId);
-  
-  activePeer = roomId;
-  localStorage.setItem('activePeer', roomId);
-  session = null;
-  
-  if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
-}
-
 function _teardownPeer() {
   if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
-  if (dataChannel) { try { dataChannel.close(); } catch {} dataChannel = null; }
-  if (peerConnection) { try { peerConnection.close(); } catch {} peerConnection = null; }
+  if (dataChannel) {
+    try { dataChannel.onmessage = null; dataChannel.close(); } catch (e) { /* ignore */ }
+    dataChannel = null;
+  }
+  if (peerConnection) {
+    try { peerConnection.ontrack = null; peerConnection.close(); } catch (e) { /* ignore */ }
+    peerConnection = null;
+  }
   pendingLocalKey = null;
   if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
 }
@@ -387,16 +411,16 @@ function _waitForIce() {
       LOG.webrtc('ICE already complete');
       return resolve();
     }
-    
+
     LOG.webrtc('Waiting for ICE gathering...');
-    
+
     peerConnection.onicegatheringstatechange = () => {
       if (peerConnection.iceGatheringState === 'complete') {
         LOG.webrtc('ICE gathering complete');
         resolve();
       }
     };
-    
+
     setTimeout(() => {
       LOG.warn('ICE gathering timeout (5s)');
       resolve();
@@ -408,18 +432,21 @@ async function _upsertContact(roomId, display, role) {
   const prev = contacts[roomId] || {};
   const oldLocal = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
   const oldRemote = prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []);
-  const newLocal = pendingLocalKey && !oldLocal.includes(pendingLocalKey) ? [...oldLocal, pendingLocalKey] : oldLocal;
+  const newLocal = pendingLocalKey && !oldLocal.includes(pendingLocalKey)
+    ? [...oldLocal, pendingLocalKey]
+    : oldLocal;
 
   contacts[roomId] = {
     ...prev,
     name: prev.name || display,
-    phrase: session ? session.phrase : prev.phrase,
+    phrase: (session && session.phrase) || prev.phrase,
     display: display,
     role: role,
     localKeys: newLocal,
     remoteKeys: oldRemote
   };
 
+  // активный контакт — первым
   const ordered = { [roomId]: contacts[roomId] };
   for (const [k, v] of Object.entries(contacts)) if (k !== roomId) ordered[k] = v;
   contacts = ordered;
@@ -428,8 +455,12 @@ async function _upsertContact(roomId, display, role) {
 }
 
 async function _saveContacts() {
-  if (masterPassword) await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
-  else localStorage.setItem('contacts', JSON.stringify(contacts));
+  if (masterPassword) {
+    await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
+    localStorage.removeItem('contacts');
+  } else {
+    localStorage.setItem('contacts', JSON.stringify(contacts));
+  }
 }
 
 async function _saveMessage(peerId, msg) {
@@ -458,8 +489,14 @@ async function sendMessage() {
   if (!input) return;
   const text = input.value.trim();
   if (!text) return;
-  if (!activePeer) { if (typeof UI !== 'undefined' && UI.toast) UI.toast('Нет соединения', 'error'); return; }
-  if (!dataChannel || dataChannel.readyState !== 'open') { if (typeof UI !== 'undefined' && UI.toast) UI.toast('Канал не открыт', 'error'); return; }
+  if (!activePeer) {
+    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Нет соединения', 'error');
+    return;
+  }
+  if (!dataChannel || dataChannel.readyState !== 'open') {
+    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Канал не открыт', 'error');
+    return;
+  }
 
   const contact = contacts[activePeer];
   const keys = contact?.remoteKeys || [];
@@ -489,9 +526,16 @@ async function sendMessage() {
 
 async function sendImage(file) {
   if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') return;
+  if (file.size > MAX_IMAGE_BYTES) {
+    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Файл больше 15 МБ', 'error');
+    return;
+  }
   const keys = contacts[activePeer]?.remoteKeys || [];
   const remoteKey = keys[keys.length - 1];
-  if (!remoteKey) return;
+  if (!remoteKey) {
+    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ожидание обмена ключами...', 'error');
+    return;
+  }
 
   try {
     let blob = file;
@@ -515,6 +559,14 @@ async function sendImage(file) {
   }
 }
 
+async function pruneOldKeys() {
+  for (const c of Object.values(contacts)) {
+    if (c.localKeys?.length > 1) c.localKeys = c.localKeys.slice(-1);
+    if (c.remoteKeys?.length > 1) c.remoteKeys = c.remoteKeys.slice(-1);
+  }
+  await _saveContacts();
+}
+
 window.WebRTC = {
   connect,
   cancelConnect,
@@ -524,8 +576,9 @@ window.WebRTC = {
   sendImage,
   loadHistory,
   saveContacts: _saveContacts,
+  pruneOldKeys,
   getState: () => ({
-    contacts, activePeer, currentUser, masterPassword,
+    contacts, activePeer, currentUser,
     dataChannel, peerConnection, session
   })
 };

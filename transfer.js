@@ -24,15 +24,17 @@ try { dc.send(JSON.stringify(obj)); } catch (e) {}
 }
 }
 
-function waitDrain() {
+function waitDrain(channel) {
 return new Promise((resolve) => {
 const finish = () => {
-dc.removeEventListener('bufferedamountlow', finish);
-dc.removeEventListener('close', finish);
+channel.removeEventListener('bufferedamountlow', finish);
+channel.removeEventListener('close', finish);
+clearTimeout(timer);
 resolve();
 };
-dc.addEventListener('bufferedamountlow', finish);
-dc.addEventListener('close', finish);
+const timer = setTimeout(finish, 5000);
+channel.addEventListener('bufferedamountlow', finish);
+channel.addEventListener('close', finish);
 });
 }
 
@@ -41,6 +43,7 @@ if (!dc || dc.readyState !== 'open') {
 UI.toast('Нет соединения');
 return;
 }
+const channel = dc;
 const id = newId();
 const state = { cancelled: false };
 out.set(id, state);
@@ -52,24 +55,29 @@ let seq = 0;
 const started = performance.now();
 try {
 while (offset < file.size) {
-if (state.cancelled || !dc || dc.readyState !== 'open') {
+if (state.cancelled || channel.readyState !== 'open') {
 control({ type: 'file-cancel', id });
 ui.cancelled();
 out.delete(id);
 return;
 }
-if (dc.bufferedAmount > HIGH) await waitDrain();
+if (channel.bufferedAmount > HIGH) await waitDrain(channel);
 const slice = await file.slice(offset, offset + CHUNK - HEAD).arrayBuffer();
 const packet = new ArrayBuffer(HEAD + slice.byteLength);
 const view = new DataView(packet);
 view.setUint32(0, id);
 view.setUint32(4, seq);
 new Uint8Array(packet, HEAD).set(new Uint8Array(slice));
-dc.send(packet);
+channel.send(packet);
 offset += slice.byteLength;
 seq += 1;
 const elapsed = (performance.now() - started) / 1000;
 ui.progress(offset / file.size, elapsed > 0 ? offset / elapsed : 0);
+}
+if (state.cancelled) {
+ui.cancelled();
+out.delete(id);
+return;
 }
 control({ type: 'file-done', id });
 ui.done(null);
@@ -189,5 +197,20 @@ return;
 if (dropIncoming(id)) control({ type: 'file-cancel', id });
 }
 
-return { attach, send, onMeta, onChunk, onDone, onCancel, cancel };
+function abortAll() {
+for (const state of out.values()) state.cancelled = true;
+for (const t of inc.values()) {
+t.cancelled = true;
+if (t.writable) {
+try { t.writable.abort(); } catch (e) {}
+}
+t.parts = [];
+try { t.ui.cancelled(); } catch (e) {}
+}
+out.clear();
+inc.clear();
+dc = null;
+}
+
+return { attach, send, onMeta, onChunk, onDone, onCancel, cancel, abortAll };
 })();

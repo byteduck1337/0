@@ -1,4 +1,4 @@
-﻿const Settings = {
+const Settings = {
 relayOnly: false,
 displayName: ''
 };
@@ -11,6 +11,7 @@ sasWords: [],
 typingHideTimer: null,
 lastTypingSent: 0,
 scan: { active: false, stream: null, timer: 0 },
+diagData: { server: 'проверка…', binding: '—', signal: 'idle', turn: '—', ice: 'idle', sdp: '—', room: '—' },
 
 el(id) {
 return document.getElementById(id);
@@ -61,6 +62,20 @@ this.scanFromFile(ev.target.files[0]);
 ev.target.value = '';
 });
 e('lightbox').addEventListener('click', () => this.el('lightbox').classList.add('hidden'));
+for (const id of ['btn-diag-home', 'btn-diag-wait', 'btn-diag-chat']) {
+e(id).addEventListener('click', () => this.openDiag());
+}
+e('diag-close').addEventListener('click', () => this.closeModal('diag-modal'));
+e('diag-recheck').addEventListener('click', () => this.checkServer(true));
+e('diag-copy').addEventListener('click', () => this.copy(this.diagReport()));
+document.addEventListener('keydown', (ev) => {
+if (ev.key !== 'Escape') return;
+if (!this.el('scan-modal').classList.contains('hidden')) { this.closeScanner(); return; }
+for (const id of ['diag-modal', 'settings-modal', 'sas-modal']) {
+if (!this.el(id).classList.contains('hidden')) { this.closeModal(id); return; }
+}
+if (!this.el('lightbox').classList.contains('hidden')) this.el('lightbox').classList.add('hidden');
+});
 const chat = e('screen-chat');
 let depth = 0;
 chat.addEventListener('dragenter', (ev) => {
@@ -86,7 +101,120 @@ for (const f of files) Transfer.send(f);
 window.addEventListener('beforeunload', (ev) => {
 if (this.messageCount > 0) { ev.preventDefault(); ev.returnValue = ''; }
 });
+this.el('diag-browser').textContent = this.browserName();
+this.renderDiag();
+this.checkServer(false);
 if (location.hash.length > 10) this.joinLink(location.href);
+},
+
+browserName() {
+const ua = navigator.userAgent;
+let m = ua.match(/Firefox\/(\d+)/);
+if (m) return 'Firefox ' + m[1];
+m = ua.match(/Edg\/(\d+)/);
+if (m) return 'Edge ' + m[1];
+m = ua.match(/Chrome\/(\d+)/);
+if (m) return 'Chrome ' + m[1];
+m = ua.match(/Version\/(\d+).*Safari/);
+if (m) return 'Safari ' + m[1];
+return 'Браузер';
+},
+
+async checkServer(notify) {
+this.diag({ server: 'проверка…' });
+this.setNet('warn', 'Проверка сигнального сервера…');
+try {
+const res = await fetch(SIGNAL_HTTP + '/health', { cache: 'no-store' });
+const data = await res.json();
+if (!res.ok) throw new Error('http ' + res.status);
+this.diag({
+server: 'онлайн · v' + (data.version || 1),
+binding: data.rooms === 'ok' ? 'ROOMS подключён' : 'ROOMS НЕ подключён',
+turn: data.turn ? 'настроен' : 'нет (только STUN)'
+});
+if (data.rooms !== 'ok') {
+this.setNet('bad', 'Воркер без Durable Object binding');
+if (notify) this.toast('Привязка ROOMS не найдена — проверьте wrangler.toml');
+} else if (!data.transports || data.transports.indexOf('sse') === -1) {
+this.setNet('warn', 'Старая версия воркера — обновите worker.js');
+if (notify) this.toast('Задеплойте новый worker.js с резервным каналом');
+} else {
+this.setNet('ok', data.turn ? 'Сервер онлайн · TURN включён' : 'Сервер онлайн · STUN');
+if (notify) this.toast('Сервер доступен');
+}
+} catch (err) {
+this.diag({ server: 'недоступен', binding: '—' });
+this.setNet('bad', 'Сигнальный сервер недоступен');
+if (notify) this.toast('Не удалось связаться с воркером');
+}
+this.renderDiag();
+},
+
+setNet(level, text) {
+for (const dotId of ['home-net-dot', 'wait-net-dot']) {
+const dot = this.el(dotId);
+dot.classList.remove('ok', 'warn', 'bad');
+dot.classList.add(level);
+}
+this.el('home-net-text').textContent = text;
+this.el('wait-net-text').textContent = text;
+},
+
+diag(patch) {
+Object.assign(this.diagData, patch);
+this.renderDiag();
+if (patch.signal) {
+const level = /WebSocket$|резервный канал/.test(patch.signal) ? 'ok'
+: /недоступен|занята|истекла/.test(patch.signal) ? 'bad' : 'warn';
+this.setNet(level, 'Сигналинг: ' + patch.signal);
+}
+},
+
+renderDiag() {
+const map = {
+'diag-server': this.diagData.server,
+'diag-binding': this.diagData.binding,
+'diag-signal': this.diagData.signal,
+'diag-turn': this.diagData.turn,
+'diag-ice': this.diagData.ice,
+'diag-sdp': this.diagData.sdp,
+'diag-room': this.diagData.room
+};
+for (const id in map) {
+const node = this.el(id);
+if (!node) continue;
+node.textContent = map[id];
+node.classList.remove('good', 'warn');
+if (/онлайн|подключён|WebSocket|резервный|connected|complete|настроен|получен/.test(map[id])) node.classList.add('good');
+else if (/проверка|переподключение|checking|connecting/.test(map[id])) node.classList.add('warn');
+}
+const hint = this.el('relay-hint');
+if (hint) {
+hint.textContent = this.diagData.turn === 'настроен'
+? 'Трафик пойдёт через TURN и скроет ваш IP. Применится при следующем подключении.'
+: 'TURN не настроен на воркере — режим недоступен. Добавьте TURN_KEY_ID и TURN_API_TOKEN.';
+}
+},
+
+diagReport() {
+const d = this.diagData;
+return [
+'/0byte/ diagnostics',
+'browser: ' + this.browserName(),
+'server: ' + d.server,
+'binding: ' + d.binding,
+'signal: ' + d.signal,
+'turn: ' + d.turn,
+'ice: ' + d.ice,
+'sdp: ' + d.sdp,
+'room: ' + d.room,
+'origin: ' + location.origin
+].join('\n');
+},
+
+openDiag() {
+this.renderDiag();
+this.openModal('diag-modal');
 },
 
 hasFiles(ev) {
@@ -168,6 +296,7 @@ for (let c = 0; c < n; c++) {
 if (qr.isDark(r, c)) ctx.fillRect(margin + c * scale, margin + r * scale, scale, scale);
 }
 }
+this.el('qr-wrap').classList.remove('hidden');
 } catch (err) {
 this.el('qr-wrap').classList.add('hidden');
 }
@@ -177,6 +306,7 @@ signalState(state) {
 if (this.el('screen-wait').classList.contains('hidden')) return;
 const status = this.el('wait-status');
 if (state === 'paired') status.textContent = 'Собеседник найден, устанавливаем канал…';
+else if (state === 'linked') status.textContent = Session.mode === 'host' ? 'Канал связи готов, ждём собеседника…' : 'Канал связи готов…';
 else status.textContent = Session.mode === 'host' ? 'Ожидание собеседника…' : 'Подключение…';
 },
 
@@ -209,8 +339,10 @@ if (!this.el('screen-chat').classList.contains('hidden')) this.addSystem('Соб
 
 fatal(message) {
 Session.close();
+Transfer.abortAll();
 this.showScreen('home');
 this.toast(message);
+this.openDiag();
 },
 
 setPeerName(name) {
@@ -318,7 +450,10 @@ wrap.append(row, bar);
 box.append(wrap);
 box.scrollTop = box.scrollHeight;
 const self = this;
+let finished = false;
 const finish = () => {
+if (finished) return;
+finished = true;
 bar.remove();
 cancelBtn.remove();
 };
@@ -333,6 +468,7 @@ wrap.append(img);
 };
 return {
 progress(ratio, speed) {
+if (finished) return;
 const pct = Math.min(100, Math.floor(ratio * 100));
 fill.style.width = pct + '%';
 metaEl.textContent = pct + '%' + (speed ? ' · ' + self.formatBytes(speed) + '/с' : '') + ' · ' + self.formatBytes(size);
@@ -464,6 +600,7 @@ this.joinLink(text);
 openSettings() {
 this.el('name-input').value = Settings.displayName;
 this.el('relay-toggle').checked = Settings.relayOnly;
+this.renderDiag();
 this.openModal('settings-modal');
 },
 
@@ -478,6 +615,7 @@ this.el(id).classList.add('hidden');
 burn() {
 if (!confirm('Уничтожить сессию? Сообщения и файлы будут стёрты безвозвратно.')) return;
 Session.close();
+Transfer.abortAll();
 for (const url of this.blobUrls) {
 try { URL.revokeObjectURL(url); } catch (e) {}
 }
@@ -491,6 +629,7 @@ this.el('peer-name').textContent = 'Собеседник';
 this.el('peer-status').textContent = 'офлайн';
 this.el('status-dot').classList.remove('online');
 this.el('typing-bar').classList.add('hidden');
+this.diag({ signal: 'idle', ice: 'idle', sdp: '—', room: '—' });
 this.showScreen('home');
 this.toast('Сессия уничтожена');
 },
@@ -527,7 +666,7 @@ box.append(div);
 setTimeout(() => {
 div.classList.add('out');
 setTimeout(() => div.remove(), 350);
-}, 3000);
+}, 3200);
 },
 
 formatBytes(b) {

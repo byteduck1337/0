@@ -1,586 +1,273 @@
-const SIGNALING_URL = 'https://stable.okeysexsex.workers.dev';
+﻿const SIGNAL_HOST = 'stable.okeysexsex.workers.dev';
 
-const ICE_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' }
-  ]
+const Session = {
+mode: null,
+roomId: null,
+key: null,
+ws: null,
+pc: null,
+dc: null,
+iceServers: null,
+pendingIce: [],
+closedByUser: false,
+reconnectTimer: null,
+reconnectAttempts: 0,
+
+async create() {
+this.close();
+const secret = CryptoSystem.randomBytes(16);
+const hash = CryptoSystem.b64encode(secret);
+await this.start(secret, 'host');
+history.replaceState(null, '', '#' + hash);
+return location.origin + location.pathname + '#' + hash;
+},
+
+async join(link) {
+const text = String(link).trim();
+const idx = text.indexOf('#');
+const hash = (idx === -1 ? text : text.slice(idx + 1)).split(/[\s?&]/)[0];
+const secret = CryptoSystem.b64decode(hash);
+if (secret.length !== 16) throw new Error('invalid link');
+this.close();
+await this.start(secret, 'guest');
+},
+
+async start(secret, mode) {
+this.closedByUser = false;
+this.reconnectAttempts = 0;
+this.mode = mode;
+const derived = await CryptoSystem.deriveRoom(secret);
+this.roomId = derived.roomId;
+this.key = derived.key;
+this.iceServers = await this.fetchIce();
+this.setupPeer();
+this.openSocket();
+},
+
+async fetchIce() {
+try {
+const r = await fetch('https://' + SIGNAL_HOST + '/turn', { cache: 'no-store' });
+if (r.ok) {
+const j = await r.json();
+if (j.iceServers) return Array.isArray(j.iceServers) ? j.iceServers : [j.iceServers];
+}
+} catch (e) {}
+return [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }];
+},
+
+openSocket() {
+if (this.closedByUser) return;
+this.ws = new WebSocket('wss://' + SIGNAL_HOST + '/ws/' + this.roomId);
+this.ws.onopen = () => {
+this.reconnectAttempts = 0;
+UI.signalState('waiting');
+if (this.mode === 'guest') this.send({ type: 'hello' });
+};
+this.ws.onmessage = (e) => { this.onSignal(e.data); };
+this.ws.onclose = (e) => {
+if (this.closedByUser) return;
+const live = this.dc && this.dc.readyState === 'open';
+if (!live && e.code === 4001) { UI.fatal('Комната уже занята'); return; }
+if (!live && e.code === 4000) { UI.fatal('Срок действия комнаты истёк'); return; }
+this.reconnectAttempts += 1;
+const delay = Math.min(1500 * Math.pow(2, this.reconnectAttempts - 1), 15000);
+this.reconnectTimer = setTimeout(() => this.openSocket(), delay);
+};
+},
+
+async send(obj) {
+if (!this.ws || this.ws.readyState !== 1) return;
+const envelope = await CryptoSystem.seal(this.key, obj);
+this.ws.send(JSON.stringify(envelope));
+},
+
+async makeOffer() {
+if (!this.pc || this.pc.localDescription) return;
+await this.pc.setLocalDescription(await this.pc.createOffer());
+this.send({ type: 'sdp', sdp: this.pc.localDescription.toJSON() });
+},
+
+async onSignal(raw) {
+let m;
+try { m = JSON.parse(raw); } catch (e) { return; }
+if (m.type === 'peer-joined') {
+UI.signalState('paired');
+if (this.mode === 'host') await this.makeOffer();
+return;
+}
+if (m.type === 'peer-left') {
+UI.peerLeft();
+this.restartPeer();
+return;
+}
+if (m.type === 'waiting') {
+UI.signalState('waiting');
+return;
+}
+if (!m.i || !m.c) return;
+let msg;
+try { msg = await CryptoSystem.open(this.key, m); } catch (e) { return; }
+if (msg.type === 'hello' && this.mode === 'host') {
+if (this.pc.localDescription && (!this.dc || this.dc.readyState !== 'open')) this.restartPeer();
+await this.makeOffer();
+return;
+}
+if (msg.type === 'sdp' && msg.sdp) {
+try {
+await this.pc.setRemoteDescription(msg.sdp);
+for (const c of this.pendingIce) {
+try { await this.pc.addIceCandidate(c); } catch (e) {}
+}
+this.pendingIce = [];
+if (msg.sdp.type === 'offer') {
+await this.pc.setLocalDescription(await this.pc.createAnswer());
+this.send({ type: 'sdp', sdp: this.pc.localDescription.toJSON() });
+}
+} catch (e) {}
+return;
+}
+if (msg.type === 'ice' && msg.candidate) {
+if (this.pc.remoteDescription) {
+try { await this.pc.addIceCandidate(msg.candidate); } catch (e) {}
+} else {
+this.pendingIce.push(msg.candidate);
+}
+}
+},
+
+setupPeer() {
+const hasTurn = this.iceServers.some(s => {
+const u = Array.isArray(s.urls) ? s.urls[0] : s.urls;
+return String(u).startsWith('turn');
+});
+const policy = Settings.relayOnly && hasTurn ? 'relay' : 'all';
+this.pc = new RTCPeerConnection({ iceServers: this.iceServers, iceTransportPolicy: policy });
+this.pc.onicecandidate = (e) => {
+if (e.candidate) this.send({ type: 'ice', candidate: e.candidate.toJSON() });
+};
+this.pc.onconnectionstatechange = () => {
+const s = this.pc.connectionState;
+UI.connState(s);
+if (s === 'failed') this.restartPeer();
+};
+if (this.mode === 'host') {
+this.bindChannel(this.pc.createDataChannel('0byte', { ordered: true }));
+} else {
+this.pc.ondatachannel = (e) => this.bindChannel(e.channel);
+}
+},
+
+restartPeer() {
+if (this.closedByUser) return;
+this.pendingIce = [];
+if (this.dc) {
+this.dc.onopen = null;
+this.dc.onclose = null;
+this.dc.onmessage = null;
+try { this.dc.close(); } catch (e) {}
+this.dc = null;
+}
+if (this.pc) {
+this.pc.onicecandidate = null;
+this.pc.onconnectionstatechange = null;
+this.pc.ondatachannel = null;
+try { this.pc.close(); } catch (e) {}
+this.pc = null;
+}
+this.setupPeer();
+if (this.mode === 'guest' && this.ws && this.ws.readyState === 1) this.send({ type: 'hello' });
+},
+
+bindChannel(dc) {
+this.dc = dc;
+dc.binaryType = 'arraybuffer';
+dc.bufferedAmountLowThreshold = 1048576;
+dc.onopen = async () => {
+Transfer.attach(dc);
+let words = [];
+try {
+words = await CryptoSystem.sas(this.pc.localDescription.sdp, this.pc.remoteDescription.sdp);
+} catch (e) {}
+UI.connected(words);
+this.sendProfile();
+};
+dc.onclose = () => {
+UI.disconnected();
+if (!this.closedByUser) this.restartPeer();
+};
+dc.onmessage = (e) => Router.route(e.data);
+},
+
+sendProfile() {
+if (this.dc && this.dc.readyState === 'open') {
+this.dc.send(JSON.stringify({ type: 'profile', name: Settings.displayName }));
+}
+},
+
+sendText(text) {
+if (!this.dc || this.dc.readyState !== 'open') return false;
+this.dc.send(JSON.stringify({ type: 'msg', text, ts: Date.now() }));
+return true;
+},
+
+sendTyping() {
+if (this.dc && this.dc.readyState === 'open') {
+this.dc.send(JSON.stringify({ type: 'typing' }));
+}
+},
+
+close() {
+this.closedByUser = true;
+clearTimeout(this.reconnectTimer);
+if (this.dc) {
+this.dc.onopen = null;
+this.dc.onclose = null;
+this.dc.onmessage = null;
+try { this.dc.close(); } catch (e) {}
+}
+if (this.pc) {
+this.pc.onicecandidate = null;
+this.pc.onconnectionstatechange = null;
+this.pc.ondatachannel = null;
+try { this.pc.close(); } catch (e) {}
+}
+if (this.ws) {
+this.ws.onopen = null;
+this.ws.onmessage = null;
+this.ws.onclose = null;
+try { this.ws.close(); } catch (e) {}
+}
+this.dc = null;
+this.pc = null;
+this.ws = null;
+this.pendingIce = [];
+this.mode = null;
+this.key = null;
+this.roomId = null;
+history.replaceState(null, '', location.pathname);
+}
 };
 
-const MAX_IMAGE_BYTES = 15 * 1024 * 1024;
-
-let currentUser = null;
-let myName = 'Node_01';
-let contacts = {};
-let activePeer = null;
-let masterPassword = null;
-
-let peerConnection = null;
-let dataChannel = null;
-let pendingLocalKey = null;
-let keySendInterval = null;
-let session = null;
-
-const LOG = {
-  webrtc:  (...a) => console.log('%c[WebRTC]%c',  'color:#38bdf8;font-weight:bold', 'color:inherit', ...a),
-  signal:  (...a) => console.log('%c[Signal]%c',   'color:#fbbf24;font-weight:bold', 'color:inherit', ...a),
-  channel: (...a) => console.log('%c[Channel]%c',  'color:#10b981;font-weight:bold', 'color:inherit', ...a),
-  keys:    (...a) => console.log('%c[Keys]%c',     'color:#a78bfa;font-weight:bold', 'color:inherit', ...a),
-  send:    (...a) => console.log('%c[Send]%c',     'color:#34d399;font-weight:bold', 'color:inherit', ...a),
-  error:   (...a) => console.error('%c[ERROR]%c',  'color:#ef4444;font-weight:bold', 'color:inherit', ...a),
-  warn:    (...a) => console.warn('%c[WARN]%c',    'color:#f59e0b;font-weight:bold', 'color:inherit', ...a),
+const Router = {
+route(data) {
+if (data instanceof ArrayBuffer) {
+Transfer.onChunk(data);
+return;
+}
+let m;
+try { m = JSON.parse(data); } catch (e) { return; }
+if (m.type === 'msg') {
+UI.addMessage({ mine: false, text: String(m.text || '').slice(0, 16000), ts: Number(m.ts) || Date.now() });
+} else if (m.type === 'typing') {
+UI.peerTyping();
+} else if (m.type === 'profile') {
+UI.setPeerName(String(m.name || '').slice(0, 40));
+} else if (m.type === 'file-meta') {
+Transfer.onMeta(m);
+} else if (m.type === 'file-done') {
+Transfer.onDone(m.id);
+} else if (m.type === 'file-cancel') {
+Transfer.onCancel(m.id);
+}
+}
 };
-
-const ADJ = [
-  'быстрый','тихий','смелый','красный','синий','белый','чёрный','серый','ясный','тёплый',
-  'холодный','летний','зимний','весенний','осенний','дикий','гордый','умный','добрый','строгий',
-  'весёлый','ловкий','мудрый','верный','вольный','мягкий','твёрдый','лёгкий','тайный','светлый',
-  'тёмный','золотой','серебряный','стальной','небесный','земной','полярный','восточный','западный','северный',
-  'южный','дальний','близкий','новый','старый','молодой','вечный','утренний','вечерний','ночной',
-  'дневной','сильный','спокойный','яркий','бледный','чистый','глубокий','высокий','ровный','острый',
-  'круглый','тонкий','широкий','малый','великий','простой','редкий','громкий','бодрый','пепельный',
-  'янтарный','зеркальный'
-];
-const NOUN = [
-  'сокол','волк','медведь','лиса','барс','тигр','орлан','кит','дельфин','аист',
-  'журавль','ворон','гагара','туман','ветер','дождь','снег','иней','роса','заря',
-  'закат','рассвет','полночь','комета','метеор','орбита','кварц','гранит','кремний','кобальт',
-  'никель','титан','атолл','фьорд','каньон','хребет','пик','обрыв','маяк','радар',
-  'импульс','вектор','сигнал','канал','шифр','ключ','код','доступ','протокол','север',
-  'восток','запад','юг','полюс','экватор','меридиан','лагуна','бухта','мыс','пролив',
-  'волна','прибой','русло','исток','дельта','порог','каскад','массив','кристалл','горизонт',
-  'зенит','азимут'
-];
-
-function generatePhrase() {
-  const rnd = new Uint32Array(3);
-  crypto.getRandomValues(rnd);
-  const num = String(rnd[2] % 1000).padStart(3, '0');
-  return `${ADJ[rnd[0] % ADJ.length]}-${NOUN[rnd[1] % NOUN.length]}-${num}`;
-}
-
-function normalizePhrase(raw) {
-  return (raw || '').toLowerCase().replace(/[^a-zа-яё0-9]/g, '');
-}
-
-const Signal = {
-  async getOffer(roomId) {
-    try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${roomId}/offer`, { cache: 'no-store' });
-      return r.ok ? await r.json() : null;
-    } catch (e) {
-      throw new Error('Сигнальный сервер недоступен: ' + e.message);
-    }
-  },
-  async getAnswer(roomId) {
-    try {
-      const r = await fetch(`${SIGNALING_URL}/api/rooms/${roomId}/answer`, { cache: 'no-store' });
-      return r.ok ? await r.json() : null;
-    } catch { return null; }
-  },
-  async postOffer(roomId, sdp) {
-    return fetch(`${SIGNALING_URL}/api/rooms/${roomId}/offer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp })
-    });
-  },
-  async postAnswer(roomId, sdp) {
-    return fetch(`${SIGNALING_URL}/api/rooms/${roomId}/answer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp })
-    });
-  },
-  closeRoom(roomId) {
-    fetch(`${SIGNALING_URL}/api/rooms/${roomId}/close`, { method: 'POST' }).catch(() => {});
-  }
-};
-
-async function connect(rawPhrase) {
-  const clean = (rawPhrase || '').trim();
-  const norm = normalizePhrase(clean);
-  if (norm.length < 5) throw new Error('Фраза слишком короткая (мин. 5 символов)');
-
-  const roomId = (await CryptoSystem.sha256(norm)).slice(0, 16);
-  LOG.webrtc('connect()', { phrase: clean, roomId });
-
-  cancelConnect(true);
-  session = {
-    roomId, phrase: norm,
-    display: clean.toUpperCase().replace(/\s+/g, '-'),
-    role: null, aborted: false, timer: null
-  };
-
-  if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('checking');
-
-  let existing = null;
-  try {
-    existing = await Signal.getOffer(roomId);
-  } catch (e) {
-    cancelConnect();
-    throw e;
-  }
-  if (!session || session.aborted) return;
-
-  if (existing && existing.sdp) {
-    LOG.webrtc('Offer found → GUEST');
-    await _joinAsGuest(roomId, existing);
-  } else {
-    LOG.webrtc('No offer → HOST');
-    await _startAsHost(roomId);
-  }
-}
-
-async function _startAsHost(roomId) {
-  if (!session) return;
-  session.role = 'host';
-  _createPeerConnection(roomId, true);
-  pendingLocalKey = CryptoSystem.generateKey();
-  LOG.keys('Host key:', pendingLocalKey.slice(0, 8) + '...');
-  await _upsertContact(roomId, session.display, 'host');
-
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
-  await _waitForIce();
-  if (!session || session.aborted) return;
-
-  const res = await Signal.postOffer(roomId, peerConnection.localDescription.sdp);
-  if (!res.ok && res.status !== 409) {
-    _failConnect(`Signaling error: HTTP ${res.status}`);
-    return;
-  }
-  if (res.status === 409) {
-    LOG.webrtc('409 conflict → switching to GUEST');
-    _teardownPeer();
-    const their = await Signal.getOffer(roomId);
-    if (!their || !their.sdp) throw new Error('Не удалось подключиться');
-    return _joinAsGuest(roomId, their);
-  }
-
-  if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('waiting');
-  LOG.webrtc('Host: waiting for answer...');
-
-  if (session) {
-    session.timer = setTimeout(() => _failConnect('Время ожидания истекло'), 5 * 60 * 1000);
-  }
-
-  const poll = async () => {
-    if (!session || session.aborted) return;
-    const ans = await Signal.getAnswer(roomId);
-    if (ans && ans.sdp) {
-      LOG.webrtc('Answer received!');
-      try {
-        const sdpContent = typeof ans.sdp === 'string' ? ans.sdp : ans.sdp.sdp;
-        await peerConnection.setRemoteDescription({ type: 'answer', sdp: sdpContent });
-      } catch (e) {
-        LOG.error('setRemoteDescription failed:', e);
-      }
-    } else {
-      setTimeout(poll, 1500);
-    }
-  };
-  poll();
-}
-
-async function _joinAsGuest(roomId, offerData) {
-  if (!session) return;
-  session.role = 'guest';
-  if (typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('linking');
-
-  _createPeerConnection(roomId, false);
-  pendingLocalKey = CryptoSystem.generateKey();
-  LOG.keys('Guest key:', pendingLocalKey.slice(0, 8) + '...');
-  await _upsertContact(roomId, session.display, 'guest');
-
-  LOG.webrtc('Setting remote offer');
-  try {
-    const sdpContent = typeof offerData.sdp === 'string' ? offerData.sdp : offerData.sdp.sdp;
-    await peerConnection.setRemoteDescription({ type: 'offer', sdp: sdpContent });
-
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    await _waitForIce();
-    if (!session || session.aborted) return;
-
-    await Signal.postAnswer(roomId, peerConnection.localDescription.sdp);
-    LOG.webrtc('Guest: answer posted, waiting for handshake...');
-
-    if (session) {
-      session.timer = setTimeout(() => _failConnect('Узел не отвечает'), 90 * 1000);
-    }
-  } catch (e) {
-    LOG.error('Guest setup failed:', e);
-    _failConnect('Ошибка установки соединения: ' + e.message);
-  }
-}
-
-function cancelConnect(silent) {
-  if (session) {
-    session.aborted = true;
-    if (session.timer) clearTimeout(session.timer);
-    if (session.role === 'host') Signal.closeRoom(session.roomId);
-    session.timer = null;
-  }
-  session = null;
-  _teardownPeer();
-  if (!silent && typeof UI !== 'undefined' && UI.setConnectStage) UI.setConnectStage('idle');
-}
-
-function _failConnect(msg) {
-  LOG.error('Connection failed:', msg);
-  if (session) {
-    if (session.timer) {
-      clearTimeout(session.timer);
-      session.timer = null;
-    }
-    session.aborted = true;
-  }
-  session = null;
-  _teardownPeer();
-  if (typeof UI !== 'undefined') {
-    if (UI.setConnectStage) UI.setConnectStage('idle');
-    if (UI.toast) UI.toast(msg, 'error');
-  }
-}
-
-async function reconnect(peerId) {
-  const c = contacts[peerId];
-  if (!c || !c.phrase) {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Фраза не сохранена', 'error');
-    return;
-  }
-  if (typeof UI !== 'undefined' && UI.openNewSession) UI.openNewSession(c.phrase, true);
-}
-
-function _createPeerConnection(roomId, isHost) {
-  _teardownPeer();
-  peerConnection = new RTCPeerConnection(ICE_CONFIG);
-  LOG.webrtc('RTCPeerConnection created', { roomId, isHost });
-
-  peerConnection.oniceconnectionstatechange = () => {
-    LOG.webrtc('ICE:', peerConnection.iceConnectionState);
-    if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
-  };
-
-  peerConnection.onconnectionstatechange = () => {
-    if (!peerConnection) return;
-    const st = peerConnection.connectionState;
-    LOG.webrtc('State:', st);
-    if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
-
-    // _onConnected больше не вызывается здесь — триггерится из dataChannel.onopen
-    if ((st === 'failed' || st === 'closed') && session && !session.aborted) {
-      _failConnect('Соединение разорвано (' + st + ')');
-    }
-  };
-
-  peerConnection.onicecandidate = (e) => {
-    if (e.candidate) {
-      LOG.webrtc('ICE candidate:', e.candidate.type, e.candidate.protocol);
-    } else {
-      LOG.webrtc('ICE gathering complete');
-    }
-  };
-
-  if (isHost) {
-    dataChannel = peerConnection.createDataChannel('mesh', { ordered: true });
-    LOG.channel('DataChannel created (host)');
-    _setupDataChannel(roomId);
-  } else {
-    peerConnection.ondatachannel = (e) => {
-      dataChannel = e.channel;
-      LOG.channel('DataChannel received (guest)');
-      _setupDataChannel(roomId);
-    };
-  }
-}
-
-function _setupDataChannel(roomId) {
-  if (!dataChannel) return;
-
-  const sendKey = () => {
-    if (!dataChannel || dataChannel.readyState !== 'open') return;
-    if (!pendingLocalKey) {
-      pendingLocalKey = CryptoSystem.generateKey();
-      LOG.keys('Key regenerated:', pendingLocalKey.slice(0, 8) + '...');
-    }
-    LOG.keys('⬆ Sending key:', pendingLocalKey.slice(0, 8) + '...');
-    try {
-      dataChannel.send(JSON.stringify({ type: 'key', key: pendingLocalKey }));
-    } catch (e) {
-      LOG.warn('key send failed:', e.message);
-    }
-  };
-
-  dataChannel.onopen = () => {
-    LOG.channel('✅ DataChannel OPEN');
-    sendKey();
-    keySendInterval = setInterval(sendKey, 1000);
-
-    activePeer = roomId;
-    localStorage.setItem('activePeer', roomId);
-
-    // Сессия завершена — триггерим UI именно здесь, когда канал реально открыт
-    if (session && session.roomId === roomId) {
-      if (session.timer) clearTimeout(session.timer);
-      if (session.role === 'host') Signal.closeRoom(roomId);
-      session = null;
-      if (typeof UI !== 'undefined' && UI.onConnected) UI.onConnected(roomId);
-    }
-
-    if (typeof UI !== 'undefined') {
-      if (UI.updateStatus) UI.updateStatus();
-      if (UI.renderContacts) UI.renderContacts();
-    }
-    const banner = document.getElementById('connection-banner');
-    if (banner) banner.classList.add('hidden');
-  };
-
-  dataChannel.onclose = () => {
-    LOG.channel('❌ DataChannel CLOSED');
-    if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
-    if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
-    if (activePeer === roomId) {
-      const banner = document.getElementById('connection-banner');
-      if (banner) banner.classList.remove('hidden');
-    }
-  };
-
-  dataChannel.onerror = (e) => LOG.error('DataChannel error:', e);
-
-  dataChannel.onmessage = async (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-
-      if (msg.type === 'key') {
-        LOG.keys('⬇ Received remote key:', msg.key.slice(0, 8) + '...');
-        if (!contacts[roomId]) {
-          contacts[roomId] = { name: roomId.slice(0, 8), localKeys: [], remoteKeys: [] };
-        }
-        if (!contacts[roomId].remoteKeys) contacts[roomId].remoteKeys = [];
-        if (!contacts[roomId].remoteKeys.includes(msg.key)) {
-          contacts[roomId].remoteKeys.push(msg.key);
-          LOG.keys('Remote key saved. Total:', contacts[roomId].remoteKeys.length);
-        }
-        await _saveContacts();
-        if (activePeer === roomId && typeof UI !== 'undefined' && UI.loadMessages) UI.loadMessages(roomId);
-        try {
-          dataChannel.send(JSON.stringify({ type: 'key_ack' }));
-        } catch (e) {
-          LOG.warn('key_ack send failed (channel closed)');
-        }
-
-      } else if (msg.type === 'key_ack') {
-        LOG.keys('key_ack received — stopping broadcast');
-        if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
-
-      } else if (msg.type === 'message' || msg.type === 'image') {
-        await _saveMessage(roomId, msg);
-        if (roomId === activePeer) {
-          if (typeof UI !== 'undefined' && UI.loadMessages) UI.loadMessages(roomId);
-        } else if (contacts[roomId]) {
-          contacts[roomId].unread = (contacts[roomId].unread || 0) + 1;
-          if (typeof UI !== 'undefined' && UI.renderContacts) UI.renderContacts();
-        }
-      }
-    } catch (e) {
-      LOG.error('onmessage error:', e);
-    }
-  };
-}
-
-function _teardownPeer() {
-  if (keySendInterval) { clearInterval(keySendInterval); keySendInterval = null; }
-  if (dataChannel) {
-    try { dataChannel.onmessage = null; dataChannel.close(); } catch (e) { /* ignore */ }
-    dataChannel = null;
-  }
-  if (peerConnection) {
-    try { peerConnection.ontrack = null; peerConnection.close(); } catch (e) { /* ignore */ }
-    peerConnection = null;
-  }
-  pendingLocalKey = null;
-  if (typeof UI !== 'undefined' && UI.updateStatus) UI.updateStatus();
-}
-
-function _waitForIce() {
-  return new Promise(resolve => {
-    if (!peerConnection) return resolve();
-    if (peerConnection.iceGatheringState === 'complete') {
-      LOG.webrtc('ICE already complete');
-      return resolve();
-    }
-
-    LOG.webrtc('Waiting for ICE gathering...');
-
-    peerConnection.onicegatheringstatechange = () => {
-      if (peerConnection.iceGatheringState === 'complete') {
-        LOG.webrtc('ICE gathering complete');
-        resolve();
-      }
-    };
-
-    setTimeout(() => {
-      LOG.warn('ICE gathering timeout (5s)');
-      resolve();
-    }, 5000);
-  });
-}
-
-async function _upsertContact(roomId, display, role) {
-  const prev = contacts[roomId] || {};
-  const oldLocal = prev.localKeys || (prev.localSessionKey ? [prev.localSessionKey] : []);
-  const oldRemote = prev.remoteKeys || (prev.remoteKey ? [prev.remoteKey] : []);
-  const newLocal = pendingLocalKey && !oldLocal.includes(pendingLocalKey)
-    ? [...oldLocal, pendingLocalKey]
-    : oldLocal;
-
-  contacts[roomId] = {
-    ...prev,
-    name: prev.name || display,
-    phrase: (session && session.phrase) || prev.phrase,
-    display: display,
-    role: role,
-    localKeys: newLocal,
-    remoteKeys: oldRemote
-  };
-
-  // активный контакт — первым
-  const ordered = { [roomId]: contacts[roomId] };
-  for (const [k, v] of Object.entries(contacts)) if (k !== roomId) ordered[k] = v;
-  contacts = ordered;
-
-  await _saveContacts();
-}
-
-async function _saveContacts() {
-  if (masterPassword) {
-    await CryptoSystem.saveEncryptedContacts(contacts, masterPassword);
-    localStorage.removeItem('contacts');
-  } else {
-    localStorage.setItem('contacts', JSON.stringify(contacts));
-  }
-}
-
-async function _saveMessage(peerId, msg) {
-  const key = `history_${[currentUser, peerId].sort().join('_')}`;
-  try {
-    let history = masterPassword
-      ? await CryptoSystem.loadEncryptedHistory(key, masterPassword)
-      : JSON.parse(localStorage.getItem(key) || '[]');
-    history.push(msg);
-    if (masterPassword) await CryptoSystem.saveEncryptedHistory(key, history, masterPassword);
-    else localStorage.setItem(key, JSON.stringify(history));
-  } catch (e) {
-    LOG.error('saveMessage failed:', e);
-  }
-}
-
-async function loadHistory(peerId) {
-  const key = `history_${[currentUser, peerId].sort().join('_')}`;
-  return masterPassword
-    ? await CryptoSystem.loadEncryptedHistory(key, masterPassword)
-    : JSON.parse(localStorage.getItem(key) || '[]');
-}
-
-async function sendMessage() {
-  const input = document.getElementById('message-input');
-  if (!input) return;
-  const text = input.value.trim();
-  if (!text) return;
-  if (!activePeer) {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Нет соединения', 'error');
-    return;
-  }
-  if (!dataChannel || dataChannel.readyState !== 'open') {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Канал не открыт', 'error');
-    return;
-  }
-
-  const contact = contacts[activePeer];
-  const keys = contact?.remoteKeys || [];
-  if (keys.length === 0) {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ожидание обмена ключами...', 'error');
-    return;
-  }
-  const remoteKey = keys[keys.length - 1];
-
-  try {
-    const ciphertext = await CryptoSystem.encrypt(text, remoteKey);
-    const msg = { type: 'message', from: currentUser, ciphertext, timestamp: Date.now() };
-    dataChannel.send(JSON.stringify(msg));
-    await _saveMessage(activePeer, msg);
-    input.value = '';
-    input.style.height = 'auto';
-    if (typeof UI !== 'undefined') {
-      if (UI.loadMessages) UI.loadMessages(activePeer);
-      if (UI.toggleSendBtn) UI.toggleSendBtn();
-    }
-    LOG.send('✅ Message sent');
-  } catch (e) {
-    LOG.error('sendMessage failed:', e);
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ошибка отправки', 'error');
-  }
-}
-
-async function sendImage(file) {
-  if (!activePeer || !dataChannel || dataChannel.readyState !== 'open') return;
-  if (file.size > MAX_IMAGE_BYTES) {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Файл больше 15 МБ', 'error');
-    return;
-  }
-  const keys = contacts[activePeer]?.remoteKeys || [];
-  const remoteKey = keys[keys.length - 1];
-  if (!remoteKey) {
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ожидание обмена ключами...', 'error');
-    return;
-  }
-
-  try {
-    let blob = file;
-    let type = file.type;
-    if (typeof CryptoSystem.compressImage === 'function') {
-      const compressed = await CryptoSystem.compressImage(file, 800);
-      blob = compressed.blob;
-      type = compressed.type;
-    }
-
-    const buffer = await blob.arrayBuffer();
-    const ciphertext = await CryptoSystem.encryptData(buffer, remoteKey);
-    const msg = { type: 'image', from: currentUser, ciphertext, mimeType: type, timestamp: Date.now() };
-    dataChannel.send(JSON.stringify(msg));
-    await _saveMessage(activePeer, msg);
-    if (typeof UI !== 'undefined' && UI.loadMessages) UI.loadMessages(activePeer);
-    LOG.send('✅ Image sent');
-  } catch (e) {
-    LOG.error('sendImage failed:', e);
-    if (typeof UI !== 'undefined' && UI.toast) UI.toast('Ошибка отправки изображения', 'error');
-  }
-}
-
-async function pruneOldKeys() {
-  for (const c of Object.values(contacts)) {
-    if (c.localKeys?.length > 1) c.localKeys = c.localKeys.slice(-1);
-    if (c.remoteKeys?.length > 1) c.remoteKeys = c.remoteKeys.slice(-1);
-  }
-  await _saveContacts();
-}
-
-window.WebRTC = {
-  connect,
-  cancelConnect,
-  reconnect,
-  generatePhrase,
-  sendMessage,
-  sendImage,
-  loadHistory,
-  saveContacts: _saveContacts,
-  pruneOldKeys,
-  getState: () => ({
-    contacts, activePeer, currentUser,
-    dataChannel, peerConnection, session
-  })
-};
-
-console.log('%c[DEBUG] /0byte/ ready. WebRTC.connect("фраза")', 'color:#38bdf8;font-weight:bold');

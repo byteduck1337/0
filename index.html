@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
@@ -33,8 +33,8 @@
 <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></symbol>
 <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M13 2v7h7"/></symbol>
 <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></symbol>
-<symbol id="i-camera" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></symbol>
-<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+<symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h4l3-8 4 16 3-8h6"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></symbol>
 </svg>
 
 <div id="app">
@@ -49,6 +49,11 @@
 <button id="btn-join" class="btn-secondary"><svg class="icon"><use href="#i-link"></use></svg><span>Войти</span></button>
 </div>
 <button id="btn-scan" class="btn-ghost"><svg class="icon"><use href="#i-scan"></use></svg><span>Сканировать QR</span></button>
+<button id="btn-diag-home" class="net-strip" type="button">
+<span class="net-dot" id="home-net-dot"></span>
+<span id="home-net-text">Проверка сигнального сервера…</span>
+<svg class="icon"><use href="#i-pulse"></use></svg>
+</button>
 </div>
 </section>
 
@@ -64,6 +69,11 @@
 <button id="btn-share" class="btn-secondary hidden"><svg class="icon"><use href="#i-share"></use></svg><span>Поделиться</span></button>
 </div>
 </div>
+<button id="btn-diag-wait" class="net-strip" type="button">
+<span class="net-dot" id="wait-net-dot"></span>
+<span id="wait-net-text">Канал связи</span>
+<svg class="icon"><use href="#i-pulse"></use></svg>
+</button>
 <button id="btn-cancel-wait" class="btn-ghost"><span>Отмена</span></button>
 </div>
 </section>
@@ -79,6 +89,7 @@
 </div>
 <button id="sas-pill" class="sas-pill"><svg class="icon"><use href="#i-shield"></use></svg><span id="sas-words">—</span></button>
 <div class="chat-actions">
+<button id="btn-diag-chat" class="icon-btn" title="Диагностика соединения"><svg class="icon"><use href="#i-pulse"></use></svg></button>
 <button id="btn-settings" class="icon-btn" title="Настройки"><svg class="icon"><use href="#i-gear"></use></svg></button>
 <button id="btn-burn" class="icon-btn" title="Сжечь сессию"><svg class="icon"><use href="#i-flame"></use></svg></button>
 </div>
@@ -129,11 +140,37 @@
 <div class="toggle-row">
 <div>
 <div class="field-label">Скрывать мой IP</div>
-<div class="field-hint">Только через TURN. Применится при следующем подключении.</div>
+<div class="field-hint" id="relay-hint">Только через TURN. Применится при следующем подключении.</div>
 </div>
 <input id="relay-toggle" type="checkbox">
 </div>
 <p class="about-text">Сообщения и файлы существуют только в памяти этой вкладки. Закрыли вкладку — не осталось ничего.</p>
+</div>
+</div>
+</div>
+
+<div id="diag-modal" class="modal hidden">
+<div class="modal-card">
+<div class="modal-head">
+<span class="modal-title">Диагностика соединения</span>
+<button id="diag-close" class="icon-btn"><svg class="icon"><use href="#i-x"></use></svg></button>
+</div>
+<div class="modal-body">
+<div class="diag-grid">
+<div class="diag-row"><span class="diag-key">Сервер</span><span class="diag-val" id="diag-server">—</span></div>
+<div class="diag-row"><span class="diag-key">Bindings</span><span class="diag-val" id="diag-binding">—</span></div>
+<div class="diag-row"><span class="diag-key">Сигналинг</span><span class="diag-val" id="diag-signal">—</span></div>
+<div class="diag-row"><span class="diag-key">TURN</span><span class="diag-val" id="diag-turn">—</span></div>
+<div class="diag-row"><span class="diag-key">ICE</span><span class="diag-val" id="diag-ice">—</span></div>
+<div class="diag-row"><span class="diag-key">SDP</span><span class="diag-val" id="diag-sdp">—</span></div>
+<div class="diag-row"><span class="diag-key">Комната</span><span class="diag-val mono" id="diag-room">—</span></div>
+<div class="diag-row"><span class="diag-key">Браузер</span><span class="diag-val" id="diag-browser">—</span></div>
+</div>
+<p class="diag-note">Если WebSocket отдаёт ошибку 500 или блокируется расширением, антивирусом либо прокси, приложение автоматически переходит на резервный HTTPS-канал и соединение продолжает работать.</p>
+<div class="diag-actions">
+<button id="diag-recheck" class="btn-secondary"><svg class="icon"><use href="#i-refresh"></use></svg><span>Перепроверить</span></button>
+<button id="diag-copy" class="btn-secondary"><svg class="icon"><use href="#i-copy"></use></svg><span>Копировать отчёт</span></button>
+</div>
 </div>
 </div>
 </div>
